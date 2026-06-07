@@ -1,8 +1,50 @@
-## EventEditor for Breath of the Wild
+# TOTK-event-editor
+
+Maintained by [cargocult-mods](https://github.com/cargocult-mods) and [Codex](https://github.com/openai/codex).
+
+TOTK-event-editor is a maintained EventEditor fork developed around Tears of the
+Kingdom modding workflow. It keeps the original EventEditor workflow while adding
+compressed `.bfevfl.zs` handling, Mals/MSBT message text display, graph editing
+quality-of-life features, XML import/export helpers, tests, and Windows release builds.
+
+### Credits and provenance
+
+This fork is based on the original open-source EventEditor project by leoetlino
+and contributors.
+
+The user-facing QoL behavior reconstructed in this fork originated with Alciel's
+EventEditor build. Credit for the original QoL design and behavior goes to Alciel;
+this repository provides a maintained source reconstruction and public release path
+for those changes.
 
 ### Setup
 
 Install Python 3.6+ (**64 bit version**) and PyQt5, then run `pip install eventeditor`.
+
+### Windows executable downloads
+
+Tagged releases can include a prebuilt Windows zip. Download
+`EventEditor-Windows.zip` from the GitHub release, extract it, and run
+`EventEditor.exe` from the extracted `EventEditor` folder.
+
+Maintainers can create that zip from GitHub Actions by pushing a version tag:
+
+```sh
+git tag v1.3.10
+git push origin v1.3.10
+```
+
+The release workflow builds a one-folder executable package instead of a single-file
+executable because Qt WebEngine needs companion DLLs and resource files.
+
+### Testing
+
+To run the source tests:
+
+```sh
+python -m pip install -e .
+python -m unittest discover -s tests
+```
 
 ### Configuration
 
@@ -10,6 +52,18 @@ The configuration file is stored:
 
 * On Linux or macOS: at `~/.config/eventeditor/eventeditor.ini`
 * On Windows: at `%APPDATA%/eventeditor/eventeditor.ini`
+
+For dictionary-backed `.bfevfl.zs` files, EventEditor needs access to
+`Pack/ZsDic.pack.zs`. You can either open a file directly from an extracted RomFS
+tree that contains that dictionary pack or set:
+
+```ini
+[paths]
+totk_rom_root=/path/to/totk_romfs
+```
+
+The first time you open or save a `.zs` file without that path configured, EventEditor
+will prompt you to locate `Pack/ZsDic.pack.zs`.
 
 ### Auto-completion
 
