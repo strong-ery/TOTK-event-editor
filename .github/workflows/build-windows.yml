@@ -52,7 +52,7 @@ jobs:
             --collect-all byml `
             --collect-all aamp `
             --collect-all zstandard `
-            "eventeditor/__main__.py"
+            "scripts/pyinstaller_entry.py"
 
       - name: Package executable
         shell: pwsh
