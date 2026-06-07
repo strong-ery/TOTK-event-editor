@@ -10,6 +10,9 @@ from eventeditor import totk_zs
 class MessageArchiveError(RuntimeError):
     pass
 
+MSBT_NOT_FOUND_TEXT = '<MSBT not found in Mals>'
+MESSAGE_ID_NOT_FOUND_TEXT = '<MessageID not found in provided MSBT>'
+
 
 _TOTK_TAG_NAMES: typing.Dict[typing.Tuple[int, int], str] = {
     (0, 0): 'ruby',
@@ -163,7 +166,8 @@ def _build_named_tag(name: str, **kwargs: typing.Any) -> str:
     return '{{' + ' '.join(parts) + '}}'
 
 
-def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tags: bool = True) -> typing.Dict[str, str]:
+def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tags: bool = True,
+                          include_missing: bool = False) -> typing.Dict[str, str]:
     archive_path = Path(path)
     if not archive_path.is_file():
         raise MessageArchiveError(f'Message archive not found: {archive_path}')
@@ -177,6 +181,11 @@ def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tag
         data = totk_zs.decompress(str(archive_path), data)
 
     messages: typing.Dict[str, str] = {}
+    if include_missing:
+        for prefix, labels in needed.items():
+            for label in labels:
+                messages[f'{prefix}:{label}'] = MSBT_NOT_FOUND_TEXT
+
     for file_name, file_data in _iter_msbt_files(str(archive_path), data):
         matching_prefixes = _matching_prefixes(file_name, needed.keys())
         if not matching_prefixes:
@@ -187,6 +196,10 @@ def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tag
         except MessageArchiveError:
             continue
         if not parsed_messages:
+            if include_missing:
+                for prefix in matching_prefixes:
+                    for label in needed[prefix]:
+                        messages[f'{prefix}:{label}'] = MESSAGE_ID_NOT_FOUND_TEXT
             continue
 
         for prefix in matching_prefixes:
@@ -194,6 +207,8 @@ def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tag
                 text = parsed_messages.get(label)
                 if text is not None:
                     messages[f'{prefix}:{label}'] = text
+                elif include_missing:
+                    messages[f'{prefix}:{label}'] = MESSAGE_ID_NOT_FOUND_TEXT
 
     return messages
 
@@ -320,6 +335,8 @@ def _parse_lbl1_from_base(section: bytes, groups: typing.Iterable[typing.Tuple[i
                           endian: str) -> typing.Dict[int, str]:
     labels: typing.Dict[int, str] = {}
     for label_count, label_offset in groups:
+        if label_count <= 0:
+            continue
         offset = base + label_offset
         if offset < 0 or offset >= len(section):
             return {}

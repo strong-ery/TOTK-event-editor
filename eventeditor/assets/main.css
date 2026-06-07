@@ -60,7 +60,8 @@ text, .edgeLabel {
 }
 
 .node .label .message-tag {
-  fill: #b8bcc4 !important;
+  fill: #b8bcc4;
+  font-weight: 600;
 }
 
 .node.entry > :first-child {

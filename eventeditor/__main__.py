@@ -9,6 +9,7 @@ import typing
 
 import evfl
 from evfl import EventFlow
+from evfl.event import SubFlowEvent
 import eventeditor.ai as ai
 import eventeditor.actor_json as aj
 import eventeditor.totk_zs as totk_zs
@@ -261,6 +262,30 @@ FLOW_SUFFIX_FILTERS = {suffix: name_filter for name_filter, suffix in FLOW_FILTE
 SUPPORTED_FLOW_SUFFIXES = tuple(FLOW_FILTER_SUFFIXES.values())
 SUPPORTED_FLOW_SUFFIXES_LONGEST_FIRST = tuple(sorted(SUPPORTED_FLOW_SUFFIXES, key=len, reverse=True))
 SUPPORTED_DROP_SUFFIXES = ('.bfevfl', '.bfevfl.zs', '.bfevfl.zstd', '.bfevfl.gz')
+EVENTFLOW_OPEN_SUFFIX_CANDIDATES = (
+    '.bfevfl.zs',
+    '.bfevfl.zstd',
+    '.bfevfl.gz',
+    '.bfevfl',
+    '.evfl.zs',
+    '.evfl.zstd',
+    '.evfl.gz',
+    '.evfl',
+)
+SUPPORTED_MALS_DROP_SUFFIXES = ('.sarc.zs', '.sarc', '.msbt')
+FLOW_NAME_MATCH_SUFFIXES = SUPPORTED_FLOW_SUFFIXES + ('.evfl.zs', '.evfl.zstd', '.evfl.gz', '.evfl')
+FLOW_NAME_MATCH_SUFFIXES_LONGEST_FIRST = tuple(sorted(FLOW_NAME_MATCH_SUFFIXES, key=len, reverse=True))
+MALS_MODE_VANILLA = 'vanilla'
+MALS_MODE_INFERRED = 'inferred'
+MALS_MODE_MANUAL = 'manual'
+MALS_MODES = (MALS_MODE_VANILLA, MALS_MODE_INFERRED, MALS_MODE_MANUAL)
+MALS_ARCHIVE_PATTERNS = (
+    'USen.Product*.sarc.zs',
+    'USen*.sarc.zs',
+    '*.sarc.zs',
+    '*.sarc',
+    '*.msbt',
+)
 _STYLESHEET_ICON_CACHE: typing.Dict[typing.Tuple[str, str, str], str] = {}
 
 def split_flow_path_suffix(path: str) -> typing.Tuple[str, str]:
@@ -278,6 +303,17 @@ def strip_flow_path_suffixes(path: str) -> str:
             return stripped_path
         stripped_path = base_path
 
+def strip_flow_name_match_suffixes(path: str) -> str:
+    stripped_path = path
+    while True:
+        lowered = stripped_path.lower()
+        for suffix in FLOW_NAME_MATCH_SUFFIXES_LONGEST_FIRST:
+            if lowered.endswith(suffix):
+                stripped_path = stripped_path[:-len(suffix)]
+                break
+        else:
+            return stripped_path
+
 def normalize_flow_save_path(path: str, selected_filter: str) -> str:
     base = path
     while True:
@@ -294,6 +330,198 @@ def normalize_flow_save_path(path: str, selected_filter: str) -> str:
     if 'bfevfl' in selected_filter:
         return base + '.bfevfl'
     return base
+
+def iter_event_flow_flowcharts(flow: typing.Optional[EventFlow]) -> typing.Iterable[typing.Any]:
+    if not flow:
+        return
+
+    seen: typing.Set[int] = set()
+
+    def maybe_yield(flowchart) -> typing.Iterable[typing.Any]:
+        if not flowchart:
+            return
+        object_id = id(flowchart)
+        if object_id in seen:
+            return
+        seen.add(object_id)
+        yield flowchart
+
+    yield from maybe_yield(getattr(flow, 'flowchart', None))
+
+    for attr_name in ('flowcharts', 'flow_charts'):
+        collection = getattr(flow, attr_name, None)
+        if not collection:
+            continue
+        if isinstance(collection, dict):
+            values = collection.values()
+        else:
+            values = getattr(collection, 'data', collection)
+        for item in values:
+            yield from maybe_yield(getattr(item, 'v', item))
+
+def flow_names_for_flow(flow: typing.Optional[EventFlow]) -> typing.List[str]:
+    names: typing.List[str] = []
+
+    def add_name(value) -> None:
+        if isinstance(value, str) and value and value not in names:
+            names.append(value)
+
+    if flow:
+        add_name(getattr(flow, 'name', ''))
+    for flowchart in iter_event_flow_flowcharts(flow):
+        add_name(getattr(flowchart, 'name', ''))
+    return names
+
+def primary_flow_name_for_flow(flow: typing.Optional[EventFlow]) -> str:
+    if flow and getattr(flow, 'flowchart', None) and getattr(flow.flowchart, 'name', ''):
+        return flow.flowchart.name
+    names = flow_names_for_flow(flow)
+    return names[0] if names else ''
+
+def flow_filename_name_for_path(path: str) -> str:
+    return Path(strip_flow_name_match_suffixes(Path(path).name)).name
+
+def find_filename_flow_name_mismatch(path: str, flow: typing.Optional[EventFlow]) -> typing.Optional[typing.Tuple[str, typing.List[str]]]:
+    filename = flow_filename_name_for_path(path)
+    flow_names = flow_names_for_flow(flow)
+    if not filename or not flow_names or filename in flow_names:
+        return None
+    return filename, flow_names
+
+def find_missing_internal_subflow_calls(flow: typing.Optional[EventFlow]) -> typing.List[str]:
+    if not flow:
+        return []
+
+    flowcharts = list(iter_event_flow_flowcharts(flow))
+    entry_points_by_flow_name: typing.Dict[str, typing.Set[str]] = {}
+    for flowchart in flowcharts:
+        entry_names = {
+            entry_point.name
+            for entry_point in getattr(flowchart, 'entry_points', []) or []
+            if getattr(entry_point, 'name', '')
+        }
+        for flow_name in {getattr(flow, 'name', ''), getattr(flowchart, 'name', '')}:
+            if flow_name:
+                entry_points_by_flow_name.setdefault(flow_name, set()).update(entry_names)
+
+    missing: typing.List[str] = []
+    known_flow_names = set(entry_points_by_flow_name.keys())
+    for flowchart in flowcharts:
+        source_flow_name = getattr(flowchart, 'name', '') or getattr(flow, 'name', '')
+        for event in getattr(flowchart, 'events', []) or []:
+            event_data = getattr(event, 'data', None)
+            if not isinstance(event_data, SubFlowEvent):
+                continue
+            target_flow_name = event_data.res_flowchart_name or source_flow_name
+            if event_data.res_flowchart_name and target_flow_name not in known_flow_names:
+                continue
+            target_entry_points = entry_points_by_flow_name.get(target_flow_name, set())
+            if event_data.entry_point_name in target_entry_points:
+                continue
+            target_display = f'{target_flow_name}<{event_data.entry_point_name}>' if target_flow_name else f'<{event_data.entry_point_name}>'
+            event_name = getattr(event, 'name', '<unnamed event>')
+            missing.append(f'{event_name} calls {target_display}')
+    return missing
+
+def _path_from_parts(parts: typing.Sequence[str]) -> typing.Optional[Path]:
+    if not parts:
+        return None
+    return Path(*parts)
+
+def infer_eventflow_owner_root(flow_path: str) -> typing.Optional[Path]:
+    if not flow_path:
+        return None
+
+    path = Path(flow_path)
+    parts = path.parts
+    lower_parts = [part.lower() for part in parts]
+    for index in range(len(lower_parts) - 2):
+        if lower_parts[index:index + 3] == ['romfs', 'event', 'eventflow']:
+            return _path_from_parts(parts[:index])
+
+    for index in range(len(lower_parts) - 1):
+        if lower_parts[index:index + 2] == ['event', 'eventflow']:
+            return _path_from_parts(parts[:index])
+    return None
+
+def infer_eventflow_mals_dir(flow_path: str) -> typing.Optional[Path]:
+    owner_root = infer_eventflow_owner_root(flow_path)
+    if not owner_root:
+        return None
+
+    parts = [part.lower() for part in Path(flow_path).parts]
+    if 'romfs' in parts:
+        return owner_root / 'romfs' / 'Mals'
+    return owner_root / 'Mals'
+
+def choose_mals_archive_from_directory(mals_dir: typing.Optional[Path]) -> str:
+    if not mals_dir or not mals_dir.is_dir():
+        return ''
+
+    for pattern in MALS_ARCHIVE_PATTERNS:
+        matches = sorted(
+            (path for path in mals_dir.glob(pattern) if path.is_file()),
+            key=lambda path: path.name.lower(),
+        )
+        if matches:
+            return str(matches[0])
+    return ''
+
+def infer_mals_archive_for_flow_path(flow_path: str) -> str:
+    return choose_mals_archive_from_directory(infer_eventflow_mals_dir(flow_path))
+
+def vanilla_mals_archive_path() -> str:
+    romfs_path = totk_zs.get_romfs_path()
+    if not romfs_path:
+        return ''
+    return choose_mals_archive_from_directory(Path(romfs_path) / 'Mals')
+
+def is_path_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+def is_vanilla_romfs_path(path: str) -> bool:
+    romfs_path = totk_zs.get_romfs_path()
+    if not path or not romfs_path:
+        return False
+    return is_path_relative_to(Path(path), Path(romfs_path))
+
+def find_eventflow_file_in_directory(directory: typing.Optional[Path], flow_name: str) -> str:
+    if not directory or not flow_name:
+        return ''
+    if not directory.is_dir():
+        return ''
+
+    direct_path = directory / flow_name
+    if direct_path.is_file():
+        return str(direct_path)
+
+    stripped_name = flow_filename_name_for_path(flow_name)
+    for suffix in EVENTFLOW_OPEN_SUFFIX_CANDIDATES:
+        candidate = directory / f'{stripped_name}{suffix}'
+        if candidate.is_file():
+            return str(candidate)
+    return ''
+
+def current_mals_display_name(mode: str, current_path: str, flow_path: str, manual_path: str = '') -> str:
+    if mode == MALS_MODE_VANILLA:
+        return 'Vanilla'
+    if mode == MALS_MODE_MANUAL:
+        return 'Manual'
+
+    romfs_path = totk_zs.get_romfs_path()
+    if current_path and romfs_path and is_path_relative_to(Path(current_path), Path(romfs_path)):
+        return 'Vanilla'
+
+    if mode == MALS_MODE_INFERRED:
+        owner_root = infer_eventflow_owner_root(flow_path)
+        if owner_root:
+            return owner_root.name or str(owner_root)
+        return 'Inferred'
+    return 'None'
 
 def _tint_pixmap(pixmap: qg.QPixmap, color: qg.QColor) -> qg.QPixmap:
     tinted = qg.QPixmap(pixmap.size())
@@ -475,6 +703,14 @@ class MainWindow(q.QMainWindow):
         self.undo_stack.setUndoLimit(600)
         self._history_suspended = False
         self._history_snapshot = b''
+        self._mals_mode = MALS_MODE_INFERRED
+        self._manual_mals_path = ''
+        self._include_mals_text_tags = True
+        self._render_mals_tags_as_styling = True
+        self._hide_non_formatting_mals_tags = False
+        self._include_mals_blank_lines = False
+        self._show_mals_text_bubble_breaks = True
+        self._startup_entry_point_name = getattr(args, 'entry_point', '') or ''
 
         app = q.QApplication.instance()
         self.default_palette = qg.QPalette(app.palette()) if app else qg.QPalette()
@@ -521,6 +757,10 @@ class MainWindow(q.QMainWindow):
         lower = path.lower()
         return lower.endswith(SUPPORTED_DROP_SUFFIXES)
 
+    def _isSupportedMalsPath(self, path: str) -> bool:
+        lower = path.lower()
+        return lower.endswith(SUPPORTED_MALS_DROP_SUFFIXES)
+
     def _extractDroppedFlowPaths(self, event) -> typing.List[str]:
         mime = event.mimeData()
         if not mime.hasUrls():
@@ -535,24 +775,50 @@ class MainWindow(q.QMainWindow):
                 paths.append(local_path)
         return paths
 
-    def _launchNewInstanceForPath(self, path: str) -> bool:
+    def _extractDroppedMalsPaths(self, event) -> typing.List[str]:
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return []
+
+        paths: typing.List[str] = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            local_path = url.toLocalFile()
+            if self._isSupportedMalsPath(local_path):
+                paths.append(local_path)
+        return paths
+
+    def _launchNewInstanceForPath(self, path: str, entry_point_name: str = '') -> bool:
+        launch_args: typing.List[str] = []
+        if entry_point_name:
+            launch_args.extend(['--entry-point', entry_point_name])
+        launch_args.append(path)
         if getattr(sys, 'frozen', False):
-            return qc.QProcess.startDetached(sys.executable, [path])
-        return qc.QProcess.startDetached(sys.executable, ['-m', 'eventeditor', path])
+            return qc.QProcess.startDetached(sys.executable, launch_args)
+        return qc.QProcess.startDetached(sys.executable, ['-m', 'eventeditor'] + launch_args)
 
     def dragEnterEvent(self, event) -> None:
-        if self._extractDroppedFlowPaths(event):
+        if self._extractDroppedFlowPaths(event) or self._extractDroppedMalsPaths(event):
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if self._extractDroppedFlowPaths(event):
+        if self._extractDroppedFlowPaths(event) or self._extractDroppedMalsPaths(event):
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dropEvent(self, event) -> None:
+        mals_paths = self._extractDroppedMalsPaths(event)
+        if mals_paths:
+            if self.setMalsPath(mals_paths[0], force_reload=True, report_errors=True, mode=MALS_MODE_MANUAL):
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
+
         paths = self._extractDroppedFlowPaths(event)
         if not paths:
             event.ignore()
@@ -602,7 +868,8 @@ class MainWindow(q.QMainWindow):
         elif self._restore_maximized:
             self.showMaximized()
         if self.args.event_flow_file:
-            self.readFlow(self.args.event_flow_file)
+            if self.readFlow(self.args.event_flow_file):
+                self.selectStartupEntryPointIfRequested()
 
     def initMenu(self) -> None:
         menu = self.menuBar()
@@ -671,11 +938,6 @@ class MainWindow(q.QMainWindow):
         self.event_message_visible_action.setChecked(False)
         self.event_message_visible_action.triggered.connect(self.onEventMessageVisibilityChanged)
         view_menu.addAction(self.event_message_visible_action)
-        self.event_tag_visible_action = q.QAction('Show &tags', self)
-        self.event_tag_visible_action.setCheckable(True)
-        self.event_tag_visible_action.setChecked(True)
-        self.event_tag_visible_action.triggered.connect(self.onEventTagVisibilityChanged)
-        view_menu.addAction(self.event_tag_visible_action)
         view_menu.addSeparator()
         self.reload_graph_action = q.QAction('&Reload graph', self)
         self.reload_graph_action.setShortcut('Ctrl+Shift+R')
@@ -692,18 +954,60 @@ class MainWindow(q.QMainWindow):
         self.add_fork_action = q.QAction('Add fork...', self)
         view_menu.addAction(self.add_fork_action)
 
+        self.mals_menu = menu.addMenu('&Mals')
+        self.current_mals_menu = q.QMenu('Current: None', self)
+        self.open_mals_folder_action = q.QAction('Open Folder', self)
+        self.open_mals_folder_action.triggered.connect(self.onOpenCurrentMalsFolder)
+        self.current_mals_menu.addAction(self.open_mals_folder_action)
+        self.open_current_mals_action = q.QAction('Open Mals', self)
+        self.open_current_mals_action.triggered.connect(self.onOpenCurrentMals)
+        self.current_mals_menu.addAction(self.open_current_mals_action)
+        self.mals_menu.addMenu(self.current_mals_menu)
+        self.mals_menu.addSeparator()
+
+        self.vanilla_mals_action = q.QAction('Vanilla', self)
+        self.vanilla_mals_action.triggered.connect(lambda: self.setMalsMode(MALS_MODE_VANILLA))
+        self.mals_menu.addAction(self.vanilla_mals_action)
+        self.inferred_mals_action = q.QAction('Inferred from EventFlow', self)
+        self.inferred_mals_action.triggered.connect(lambda: self.setMalsMode(MALS_MODE_INFERRED))
+        self.mals_menu.addAction(self.inferred_mals_action)
+        self.manual_mals_action = q.QAction('Manual...', self)
+        self.manual_mals_action.triggered.connect(self.onSetMalsPath)
+        self.mals_menu.addAction(self.manual_mals_action)
+        self.mals_menu.addSeparator()
+
+        self.render_mals_tags_as_styling_action = q.QAction('Turn style tags into formatting', self)
+        self.render_mals_tags_as_styling_action.setCheckable(True)
+        self.render_mals_tags_as_styling_action.setChecked(True)
+        self.render_mals_tags_as_styling_action.toggled.connect(self.onRenderMalsTagsAsStylingChanged)
+        self.mals_menu.addAction(self.render_mals_tags_as_styling_action)
+        self.hide_non_formatting_mals_tags_action = q.QAction('Hide non-formatting tags', self)
+        self.hide_non_formatting_mals_tags_action.setCheckable(True)
+        self.hide_non_formatting_mals_tags_action.setChecked(False)
+        self.hide_non_formatting_mals_tags_action.toggled.connect(self.onHideNonFormattingMalsTagsChanged)
+        self.mals_menu.addAction(self.hide_non_formatting_mals_tags_action)
+        self.hide_mals_blank_lines_action = q.QAction('Hide blank lines', self)
+        self.hide_mals_blank_lines_action.setCheckable(True)
+        self.hide_mals_blank_lines_action.setChecked(True)
+        self.hide_mals_blank_lines_action.toggled.connect(self.onHideMalsBlankLinesChanged)
+        self.mals_menu.addAction(self.hide_mals_blank_lines_action)
+        self.show_mals_text_bubble_breaks_action = q.QAction('Show text bubble breaks', self)
+        self.show_mals_text_bubble_breaks_action.setCheckable(True)
+        self.show_mals_text_bubble_breaks_action.setChecked(True)
+        self.show_mals_text_bubble_breaks_action.toggled.connect(self.onShowMalsTextBubbleBreaksChanged)
+        self.mals_menu.addAction(self.show_mals_text_bubble_breaks_action)
+        self.mals_menu.addSeparator()
+
+        self.mals_diagnostics_menu = q.QMenu('Diagnostics', self)
+        self.show_missing_mals_report_action = q.QAction('Show Missing MSBT/Message IDs...', self)
+        self.show_missing_mals_report_action.triggered.connect(self.onShowMissingMalsReport)
+        self.mals_diagnostics_menu.addAction(self.show_missing_mals_report_action)
+        self.mals_menu.addMenu(self.mals_diagnostics_menu)
+
         settings_menu = menu.addMenu('&Settings')
         self.set_totk_romfs_path_action = q.QAction('Set TOTK romfs path...', self)
         self.set_totk_romfs_path_action.triggered.connect(self.onSetTotkRomfsPath)
         settings_menu.addAction(self.set_totk_romfs_path_action)
-        self.set_mals_path_action = q.QAction('Set &Mals path...', self)
-        self.set_mals_path_action.triggered.connect(self.onSetMalsPath)
-        settings_menu.addAction(self.set_mals_path_action)
-        self.clear_mals_path_action = q.QAction('Clear Mals path', self)
-        self.clear_mals_path_action.triggered.connect(self.onClearMalsPath)
-        self.clear_mals_path_action.setEnabled(False)
-        settings_menu.addAction(self.clear_mals_path_action)
-        settings_menu.addSeparator()
         self.theme_toggle_action = q.QAction('', self)
         self.theme_toggle_action.triggered.connect(self.toggleTheme)
         settings_menu.addAction(self.theme_toggle_action)
@@ -749,6 +1053,7 @@ class MainWindow(q.QMainWindow):
 
         self.flowchart_view.readySignal.connect(self.onViewReady)
         self.flowchart_view.eventSelected.connect(self.onEventSelected)
+        self.flowchart_view.externalSubflowOpenRequested.connect(self.onOpenExternalSubflowRequested)
         self.reload_graph_action.triggered.connect(self.flowchart_view.reload)
         self.export_graph_action.triggered.connect(self.flowchart_view.export)
         self.export_definitions_action.triggered.connect(self.flowchart_view.export_definitions)
@@ -847,7 +1152,9 @@ class MainWindow(q.QMainWindow):
         ret = q.QMessageBox.question(self, 'Unsaved changes', f'{self.flow.name} has unsaved changes. Save changes before closing?', q.QMessageBox.Yes | q.QMessageBox.No | q.QMessageBox.Cancel)
 
         if ret == q.QMessageBox.Yes:
-            self.writeFlow(self.flow_path)
+            if not self.writeFlow(self.flow_path):
+                event.ignore()
+                return
             self.writeSettings()
             event.accept()
         elif ret == q.QMessageBox.No:
@@ -872,15 +1179,44 @@ class MainWindow(q.QMainWindow):
         self.event_name_visible_action.setChecked(settings.value('visible_names', False, type=bool))
         self.event_param_visible_action.setChecked(settings.value('visible_params', False, type=bool))
         self.event_message_visible_action.setChecked(settings.value('visible_messages', False, type=bool))
-        self.event_tag_visible_action.setChecked(settings.value('visible_tags', True, type=bool))
         settings.endGroup()
-        self.event_tag_visible_action.setEnabled(self.event_message_visible_action.isChecked())
 
         settings.beginGroup('paths')
-        mals_path = settings.value('mals_path', '')
+        legacy_mals_path = settings.value('mals_path', '')
         settings.endGroup()
-        if mals_path:
-            self.flowchart_view.setMessageArchivePath(mals_path, force_reload=False, report_errors=False)
+
+        settings.beginGroup('mals')
+        mode = settings.value('mode', '')
+        manual_path = settings.value('manual_path', '')
+        self._render_mals_tags_as_styling = settings.value('render_tags_as_styling', True, type=bool)
+        if settings.contains('hide_non_formatting_tags'):
+            self._hide_non_formatting_mals_tags = settings.value('hide_non_formatting_tags', False, type=bool)
+        else:
+            self._hide_non_formatting_mals_tags = not settings.value('show_non_text_tags', True, type=bool)
+        if settings.contains('hide_blank_lines'):
+            self._include_mals_blank_lines = not settings.value('hide_blank_lines', True, type=bool)
+        elif settings.contains('include_blank_lines'):
+            self._include_mals_blank_lines = settings.value('include_blank_lines', False, type=bool)
+        else:
+            self._include_mals_blank_lines = False
+        self._show_mals_text_bubble_breaks = settings.value('show_text_bubble_breaks', True, type=bool)
+        settings.endGroup()
+
+        if mode not in MALS_MODES:
+            mode = MALS_MODE_MANUAL if legacy_mals_path else MALS_MODE_INFERRED
+        self._mals_mode = mode
+        self._manual_mals_path = manual_path or legacy_mals_path or ''
+        self._include_mals_text_tags = True
+        self.render_mals_tags_as_styling_action.setChecked(self._render_mals_tags_as_styling)
+        self.hide_mals_blank_lines_action.setChecked(not self._include_mals_blank_lines)
+        self.show_mals_text_bubble_breaks_action.setChecked(self._show_mals_text_bubble_breaks)
+        self.hide_non_formatting_mals_tags_action.setChecked(self._hide_non_formatting_mals_tags)
+        self.flowchart_view.eventTagVisibilityChanged.emit(self._include_mals_text_tags)
+        self.flowchart_view.setMessageTagStylingEnabled(self._render_mals_tags_as_styling, refresh=False)
+        self.flowchart_view.setNonTextMessageTagsVisible(not self._hide_non_formatting_mals_tags, refresh=False)
+        self.flowchart_view.setMessageBlankLinesIncluded(self._include_mals_blank_lines, refresh=False)
+        self.flowchart_view.setMessageBubbleBreaksShown(self._show_mals_text_bubble_breaks, refresh=False)
+        self.applyMalsSelection(force_reload=False, report_errors=False)
         self.updateMalsPathActions()
 
         settings.beginGroup('appearance')
@@ -901,7 +1237,6 @@ class MainWindow(q.QMainWindow):
         settings.setValue('visible_names', self.event_name_visible_action.isChecked())
         settings.setValue('visible_params', self.event_param_visible_action.isChecked())
         settings.setValue('visible_messages', self.event_message_visible_action.isChecked())
-        settings.setValue('visible_tags', self.event_tag_visible_action.isChecked())
         settings.endGroup()
 
         settings.beginGroup('appearance')
@@ -912,6 +1247,15 @@ class MainWindow(q.QMainWindow):
         if aj._actor_definitions_path:
             settings.setValue('actor_definitions_root', str(aj._actor_definitions_path))
         settings.setValue('mals_path', self.flowchart_view.getMessageArchivePath())
+        settings.endGroup()
+
+        settings.beginGroup('mals')
+        settings.setValue('mode', self._mals_mode)
+        settings.setValue('manual_path', self._manual_mals_path)
+        settings.setValue('render_tags_as_styling', self._render_mals_tags_as_styling)
+        settings.setValue('hide_non_formatting_tags', self._hide_non_formatting_mals_tags)
+        settings.setValue('hide_blank_lines', not self._include_mals_blank_lines)
+        settings.setValue('show_text_bubble_breaks', self._show_mals_text_bubble_breaks)
         settings.endGroup()
 
     def updateThemeToggleAction(self) -> None:
@@ -945,15 +1289,38 @@ class MainWindow(q.QMainWindow):
 
     def updateMalsPathActions(self) -> None:
         current_path = self.flowchart_view.getMessageArchivePath()
-        has_path = bool(current_path)
-        self.clear_mals_path_action.setEnabled(has_path)
-        tooltip = current_path if has_path else 'Select a Mals/MSBT archive for message text and graph search.'
-        self.set_mals_path_action.setToolTip(tooltip)
-        self.clear_mals_path_action.setToolTip(tooltip)
+        display_name = current_mals_display_name(
+            self._mals_mode,
+            current_path,
+            self.flow_path,
+            self._manual_mals_path,
+        )
+        self.current_mals_menu.setTitle(f'Current: {display_name}')
 
-    def setMalsPath(self, path: str, force_reload: bool = True, report_errors: bool = True) -> bool:
+        for action, mode, label in (
+            (self.vanilla_mals_action, MALS_MODE_VANILLA, 'Vanilla'),
+            (self.inferred_mals_action, MALS_MODE_INFERRED, 'Inferred from EventFlow'),
+            (self.manual_mals_action, MALS_MODE_MANUAL, 'Manual...'),
+        ):
+            action.setText(f'{"•" if self._mals_mode == mode else " "} {label}')
+
+        has_path = bool(current_path)
+        can_open_current = has_path and Path(current_path).exists()
+        current_folder = self.currentMalsFolderPath()
+        can_open_folder = bool(current_folder and Path(current_folder).exists())
+        tooltip = current_path if has_path else 'No Mals/MSBT archive selected.'
+        self.open_current_mals_action.setEnabled(can_open_current)
+        self.open_current_mals_action.setToolTip(tooltip)
+        self.open_mals_folder_action.setEnabled(can_open_folder)
+        self.open_mals_folder_action.setToolTip(current_folder or tooltip)
+        self.show_missing_mals_report_action.setEnabled(bool(self.flow))
+
+    def setMalsPath(self, path: str, force_reload: bool = True, report_errors: bool = True,
+                    mode: typing.Optional[str] = None) -> bool:
         if not path:
             self.flowchart_view.clearMessageArchivePath()
+            if mode in MALS_MODES:
+                self._mals_mode = mode
             self.updateMalsPathActions()
             return True
 
@@ -974,11 +1341,50 @@ class MainWindow(q.QMainWindow):
                 q.QMessageBox.critical(self, 'Mals path', f'Failed to load message archive.\n\n{exc}')
             return False
 
+        if mode in MALS_MODES:
+            self._mals_mode = mode
+        if self._mals_mode == MALS_MODE_MANUAL:
+            self._manual_mals_path = path
         self.updateMalsPathActions()
         return True
 
+    def setMalsMode(self, mode: str, force_reload: bool = True, report_errors: bool = True) -> bool:
+        if mode not in MALS_MODES:
+            return False
+
+        previous_mode = self._mals_mode
+        self._mals_mode = mode
+        if self.applyMalsSelection(force_reload=force_reload, report_errors=report_errors):
+            return True
+
+        self._mals_mode = previous_mode
+        self.applyMalsSelection(force_reload=False, report_errors=False)
+        return False
+
+    def applyMalsSelection(self, force_reload: bool = True, report_errors: bool = True) -> bool:
+        if self._mals_mode == MALS_MODE_MANUAL:
+            path = self._manual_mals_path
+        elif self._mals_mode == MALS_MODE_VANILLA:
+            path = vanilla_mals_archive_path()
+        else:
+            path = infer_mals_archive_for_flow_path(self.flow_path)
+
+        if not path:
+            self.flowchart_view.clearMessageArchivePath()
+            self.updateMalsPathActions()
+            if report_errors and self._mals_mode != MALS_MODE_MANUAL:
+                source = 'vanilla RomFS' if self._mals_mode == MALS_MODE_VANILLA else 'current EventFlow path'
+                q.QMessageBox.warning(
+                    self,
+                    'Mals path',
+                    f'No Mals archive could be found from the {source}.',
+                )
+            return True
+
+        return self.setMalsPath(path, force_reload=force_reload, report_errors=report_errors)
+
     def onSetMalsPath(self) -> None:
-        default_path = self.flowchart_view.getMessageArchivePath() or self.flow_path
+        default_path = self._manual_mals_path or self.flowchart_view.getMessageArchivePath() or self.flow_path
         path = q.QFileDialog.getOpenFileName(
             self,
             'Select Mals/MSBT archive',
@@ -986,16 +1392,154 @@ class MainWindow(q.QMainWindow):
             'Message archives (*.sarc.zs *.sarc *.msbt);;All files (*)',
         )[0]
         if not path:
+            self.updateMalsPathActions()
             return
-        self.setMalsPath(path, force_reload=True, report_errors=True)
+        self.setMalsPath(path, force_reload=True, report_errors=True, mode=MALS_MODE_MANUAL)
 
     def onSetTotkRomfsPath(self) -> None:
         default_hint = self.flowchart_view.getMessageArchivePath() or self.flow_path
-        self.promptForTotkRomfs(default_hint)
+        if self.promptForTotkRomfs(default_hint) and self._mals_mode == MALS_MODE_VANILLA:
+            self.applyMalsSelection(force_reload=True, report_errors=False)
 
-    def onClearMalsPath(self) -> None:
-        self.flowchart_view.clearMessageArchivePath()
-        self.updateMalsPathActions()
+    def onRenderMalsTagsAsStylingChanged(self, checked: bool) -> None:
+        self._render_mals_tags_as_styling = bool(checked)
+        self.flowchart_view.setMessageTagStylingEnabled(self._render_mals_tags_as_styling)
+
+    def onHideNonFormattingMalsTagsChanged(self, checked: bool) -> None:
+        self._hide_non_formatting_mals_tags = bool(checked)
+        self.flowchart_view.setNonTextMessageTagsVisible(not self._hide_non_formatting_mals_tags)
+
+    def onHideMalsBlankLinesChanged(self, checked: bool) -> None:
+        self._include_mals_blank_lines = not bool(checked)
+        self.flowchart_view.setMessageBlankLinesIncluded(self._include_mals_blank_lines)
+
+    def onShowMalsTextBubbleBreaksChanged(self, checked: bool) -> None:
+        self._show_mals_text_bubble_breaks = bool(checked)
+        self.flowchart_view.setMessageBubbleBreaksShown(self._show_mals_text_bubble_breaks)
+
+    def currentMalsFolderPath(self) -> str:
+        current_path = self.flowchart_view.getMessageArchivePath()
+        if self._mals_mode == MALS_MODE_INFERRED:
+            owner_root = infer_eventflow_owner_root(self.flow_path)
+            if owner_root and owner_root.exists():
+                return str(owner_root)
+        elif self._mals_mode == MALS_MODE_VANILLA:
+            romfs_path = totk_zs.get_romfs_path()
+            if romfs_path and Path(romfs_path).exists():
+                return str(romfs_path)
+        if current_path:
+            return str(Path(current_path).parent)
+        return ''
+
+    def onOpenCurrentMalsFolder(self) -> None:
+        folder = self.currentMalsFolderPath()
+        if folder:
+            qg.QDesktopServices.openUrl(qc.QUrl.fromLocalFile(folder))
+
+    def onOpenCurrentMals(self) -> None:
+        current_path = self.flowchart_view.getMessageArchivePath()
+        if current_path:
+            qg.QDesktopServices.openUrl(qc.QUrl.fromLocalFile(current_path))
+
+    def onShowMissingMalsReport(self) -> None:
+        report = self.flowchart_view.buildMessageLookupReport()
+        dialog = q.QDialog(self, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
+        dialog.setWindowTitle('Missing Mals references')
+        dialog.resize(720, 480)
+        layout = q.QVBoxLayout(dialog)
+        editor = q.QPlainTextEdit(dialog)
+        editor.setReadOnly(True)
+        editor.setPlainText(report)
+        layout.addWidget(editor)
+        buttons = q.QDialogButtonBox(q.QDialogButtonBox.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec_()
+
+    def currentModEventflowDirectories(self) -> typing.List[Path]:
+        directories: typing.List[Path] = []
+        if self.flow_path:
+            directories.append(Path(self.flow_path).parent)
+
+        owner_root = infer_eventflow_owner_root(self.flow_path)
+        if owner_root:
+            flow_parts = [part.lower() for part in Path(self.flow_path).parts]
+            if 'romfs' in flow_parts:
+                directories.append(owner_root / 'romfs' / 'Event' / 'EventFlow')
+            directories.append(owner_root / 'Event' / 'EventFlow')
+
+        unique_directories: typing.List[Path] = []
+        seen: typing.Set[str] = set()
+        for directory in directories:
+            normalized = str(directory.resolve()) if directory.exists() else str(directory)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_directories.append(directory)
+        return unique_directories
+
+    def findEventflowInCurrentMod(self, flow_name: str) -> str:
+        for directory in self.currentModEventflowDirectories():
+            path = find_eventflow_file_in_directory(directory, flow_name)
+            if path:
+                return path
+        return ''
+
+    def findEventflowInVanillaRomfs(self, flow_name: str) -> str:
+        romfs_path = totk_zs.get_romfs_path()
+        if not romfs_path:
+            return ''
+        return find_eventflow_file_in_directory(Path(romfs_path) / 'Event' / 'EventFlow', flow_name)
+
+    def openSubflowTarget(self, path: str, entry_point_name: str) -> None:
+        if not self._launchNewInstanceForPath(path, entry_point_name=entry_point_name):
+            q.QMessageBox.warning(
+                self,
+                'Go to entry point',
+                f'Failed to open {Path(path).name} in a new EventEditor window.',
+            )
+
+    def selectStartupEntryPointIfRequested(self) -> None:
+        if not self._startup_entry_point_name or not self.flow:
+            return
+        entry_point_name = self._startup_entry_point_name
+        self._startup_entry_point_name = ''
+        self.tab_widget.setCurrentWidget(self.flowchart_view)
+        self.flowchart_view.selectEntryPointByName(entry_point_name)
+
+    def onOpenExternalSubflowRequested(self, flow_name: str, entry_point_name: str) -> None:
+        display_name = f'{flow_name}<{entry_point_name}>'
+        mod_path = self.findEventflowInCurrentMod(flow_name)
+        if mod_path:
+            ret = q.QMessageBox.question(
+                self,
+                'Go to entry point',
+                f'{display_name} is an external subflow.\n\nOpen it from this mod folder?',
+                q.QMessageBox.Open | q.QMessageBox.Cancel,
+                q.QMessageBox.Cancel,
+            )
+            if ret == q.QMessageBox.Open:
+                self.openSubflowTarget(mod_path, entry_point_name)
+            return
+
+        vanilla_path = self.findEventflowInVanillaRomfs(flow_name)
+        if vanilla_path:
+            ret = q.QMessageBox.question(
+                self,
+                'Go to entry point',
+                f'{display_name} not found in mod.\n\nOpen vanilla?',
+                q.QMessageBox.Open | q.QMessageBox.Cancel,
+                q.QMessageBox.Cancel,
+            )
+            if ret == q.QMessageBox.Open:
+                self.openSubflowTarget(vanilla_path, entry_point_name)
+            return
+
+        q.QMessageBox.information(
+            self,
+            'Go to entry point',
+            f'{display_name} not found in mod or vanilla.',
+        )
 
     def promptForTotkRomfs(self, path: str) -> bool:
         base_dir = ''
@@ -1078,7 +1622,8 @@ class MainWindow(q.QMainWindow):
             self.setWindowTitle(APP_DISPLAY_NAME)
         else:
             indicator = '*' if self.unsaved else ''
-            self.setWindowTitle(f'{APP_DISPLAY_NAME} - {indicator}{self.flow.name}')
+            title_name = Path(self.flow_path).name if self.flow_path else primary_flow_name_for_flow(self.flow)
+            self.setWindowTitle(f'{APP_DISPLAY_NAME} - {indicator}{title_name}')
 
         self.open_autosave_action.setEnabled(bool(self.flow) and bool(self.flow_path))
         self.save_action.setEnabled(bool(self.flow) and bool(self.flow_path))
@@ -1102,11 +1647,76 @@ class MainWindow(q.QMainWindow):
         self.flow.flowchart.name = text
         self.flow_data.flowDataChanged.emit(FlowDataChangeReason.EventFlowRename)
 
+    def confirmFilenameFlowNameMatchForSave(self, path: str) -> bool:
+        mismatch = find_filename_flow_name_mismatch(path, self.flow)
+        if not mismatch:
+            return True
+
+        filename, flow_names = mismatch
+        ret = q.QMessageBox.warning(
+            self,
+            'Filename does not match flow name',
+            'The filename does not match any named flow inside this file.\n\n'
+            'In TOTK this will probably cause the EventFlow not to run.\n\n'
+            f'Filename: {filename}\n'
+            f'Flow names: {", ".join(flow_names) if flow_names else "(none)"}',
+            q.QMessageBox.Ok | q.QMessageBox.Cancel,
+            q.QMessageBox.Cancel,
+        )
+        return ret == q.QMessageBox.Ok
+
+    def confirmInternalSubflowTargetsForSave(self) -> bool:
+        missing_calls = find_missing_internal_subflow_calls(self.flow)
+        if not missing_calls:
+            return True
+
+        listed_calls = '\n'.join(f'- {call}' for call in missing_calls[:50])
+        if len(missing_calls) > 50:
+            listed_calls += f'\n- ...and {len(missing_calls) - 50} more'
+        ret = q.QMessageBox.warning(
+            self,
+            'Missing internal subflow entry points',
+            'Some subflows call entry points inside this file that do not exist.\n\n'
+            'In TOTK this may cause the EventFlow not to run.\n\n'
+            f'{listed_calls}',
+            q.QMessageBox.Ok | q.QMessageBox.Cancel,
+            q.QMessageBox.Cancel,
+        )
+        return ret == q.QMessageBox.Ok
+
+    def confirmSaveChecks(self, path: str) -> bool:
+        return (
+            self.confirmFilenameFlowNameMatchForSave(path) and
+            self.confirmInternalSubflowTargetsForSave()
+        )
+
+    def confirmVanillaRomfsSaveTarget(self, path: str) -> str:
+        if not is_vanilla_romfs_path(path):
+            return 'save'
+
+        message_box = q.QMessageBox(self)
+        message_box.setIcon(q.QMessageBox.Warning)
+        message_box.setWindowTitle('Save')
+        message_box.setText('Warning: You are saving into the vanilla romfs dump.\nDid you really mean to?')
+        cancel_button = message_box.addButton('Cancel', q.QMessageBox.RejectRole)
+        yes_button = message_box.addButton('Yes', q.QMessageBox.AcceptRole)
+        save_as_button = message_box.addButton('Save As', q.QMessageBox.ActionRole)
+        message_box.setDefaultButton(cancel_button)
+        message_box.exec_()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == yes_button:
+            return 'save'
+        if clicked_button == save_as_button:
+            return 'save_as'
+        return 'cancel'
+
     def readFlow(self, path: str) -> bool:
         if self.flow and self.unsaved:
             ret = q.QMessageBox.question(self, 'Unsaved changes', f'{self.flow.name} has unsaved changes. Save changes before opening another file?', q.QMessageBox.Yes | q.QMessageBox.No | q.QMessageBox.Cancel)
             if ret == q.QMessageBox.Yes:
-                self.writeFlow(self.flow_path)
+                if not self.writeFlow(self.flow_path):
+                    return False
             elif ret == q.QMessageBox.Cancel:
                 return False
 
@@ -1117,6 +1727,10 @@ class MainWindow(q.QMainWindow):
             self.flow_path = path
             self.flow_data.setFlow(flow)
             self.resetUndoHistory()
+            if self._mals_mode in (MALS_MODE_VANILLA, MALS_MODE_INFERRED):
+                self.applyMalsSelection(force_reload=True, report_errors=False)
+            else:
+                self.updateMalsPathActions()
             return True
         except totk_zs.MissingDictionaryPackError as exc:
             if self.promptForTotkRomfs(path):
@@ -1132,10 +1746,26 @@ class MainWindow(q.QMainWindow):
         if not self.flow or not path:
             return False
 
+        vanilla_save_choice = self.confirmVanillaRomfsSaveTarget(path)
+        if vanilla_save_choice == 'cancel':
+            return False
+        if vanilla_save_choice == 'save_as':
+            save_as_path = self._getFlowSavePath('Save as...', path)
+            if not save_as_path:
+                return False
+            return self.writeFlow(save_as_path)
+
+        if not self.confirmSaveChecks(path):
+            return False
+
         try:
             util.write_flow(path, self.flow)
             self.flow_path = path
             self.undo_stack.setClean()
+            if self._mals_mode == MALS_MODE_INFERRED:
+                self.applyMalsSelection(force_reload=True, report_errors=False)
+            else:
+                self.updateMalsPathActions()
             self.syncUndoState()
             return True
         except totk_zs.MissingDictionaryPackError as exc:
@@ -1202,6 +1832,7 @@ class MainWindow(q.QMainWindow):
             self.onEventTagVisibilityChanged()
         finally:
             self._syncing_flowchart_visibility = False
+        self.selectStartupEntryPointIfRequested()
 
     def onEventSelected(self, event_idx: int) -> None:
         self.event_view.selectEvent(event_idx)
@@ -1231,14 +1862,12 @@ class MainWindow(q.QMainWindow):
 
     def onEventMessageVisibilityChanged(self) -> None:
         visible = self.event_message_visible_action.isChecked()
-        self.event_tag_visible_action.setEnabled(visible)
         self.flowchart_view.eventMessageVisibilityChanged.emit(visible)
         if not self._syncing_flowchart_visibility:
             self.flowchart_view.refreshDisplayOptionsPreservingSelection()
 
     def onEventTagVisibilityChanged(self) -> None:
-        visible = self.event_tag_visible_action.isChecked()
-        self.flowchart_view.eventTagVisibilityChanged.emit(visible)
+        self.flowchart_view.eventTagVisibilityChanged.emit(self._include_mals_text_tags)
         if not self._syncing_flowchart_visibility:
             self.flowchart_view.refreshDisplayOptionsPreservingSelection()
 
@@ -1251,6 +1880,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     parser = argparse.ArgumentParser(prog='eventeditor', description=f'{APP_DISPLAY_NAME}: an event flow editor')
+    parser.add_argument('--entry-point', default='', help='Entry point to select after opening the event flow file')
     parser.add_argument('event_flow_file', nargs='?', help='Event flow file to open')
     args, _ = parser.parse_known_args()
     app = q.QApplication(sys.argv)

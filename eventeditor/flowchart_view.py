@@ -59,6 +59,22 @@ class EntryPointVisibilityDelegate(q.QStyledItemDelegate):
             self._pressed_on_icon = False
         return super().editorEvent(event, model, option, index)
 
+class FlowNameLabel(q.QLabel):
+    doubleClicked = qc.pyqtSignal()
+
+    def contextMenuEvent(self, event) -> None:
+        menu = q.QMenu(self)
+        menu.addAction('Edit', lambda checked=False: self.doubleClicked.emit())
+        menu.exec_(event.globalPos())
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == qc.Qt.LeftButton:
+            self.doubleClicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
 class FlowchartWebObject(qc.QObject):
     flowDataChanged = qc.pyqtSignal()
     fileLoaded = qc.pyqtSignal(EventFlow)
@@ -186,6 +202,10 @@ class FlowchartWebObject(qc.QObject):
     def showOnlyConnectedEvents(self, node_id: int):
         self.view.webShowOnlyConnectedEvents(int(node_id))
 
+    @qc.pyqtSlot(int)
+    def goToSubflowEntryPoint(self, node_id: int):
+        self.view.webGoToSubflowEntryPoint(int(node_id))
+
     @qc.pyqtSlot()
     def showAllEvents(self):
         self.view.webShowAllEvents()
@@ -206,6 +226,7 @@ class FlowchartView(q.QWidget):
     reloadedSignal = qc.pyqtSignal()
     eventSelected = qc.pyqtSignal(int)
     selectedNodeIdsChanged = qc.pyqtSignal(list)
+    externalSubflowOpenRequested = qc.pyqtSignal(str, str)
 
     def __init__(self, parent, flow_data: FlowData) -> None:
         super().__init__(parent)
@@ -220,6 +241,10 @@ class FlowchartView(q.QWidget):
         self.showEventParams = False
         self.showEventMessages = False
         self.showMessageTags = True
+        self.renderMessageTagsAsStyling = True
+        self.showNonTextMessageTags = True
+        self.includeMessageBlankLines = True
+        self.showMessageBubbleBreaks = True
         self.dark_mode = False
         self._open_dialogs: typing.List[q.QDialog] = []
         self._entry_point_reachable_cache_key: typing.Optional[typing.Tuple[int, int, int]] = None
@@ -254,6 +279,13 @@ class FlowchartView(q.QWidget):
         self.view.setUrl(qc.QUrl.fromLocalFile(get_path('assets/index.html')))
 
         self.entry_point_view = q.QListView(self)
+        self.flow_name_label = FlowNameLabel(self)
+        self.flow_name_label.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)
+        flow_name_font = self.flow_name_label.font()
+        flow_name_font.setBold(True)
+        self.flow_name_label.setFont(flow_name_font)
+        self.flow_name_label.setContentsMargins(6, 4, 6, 2)
+        self.flow_name_label.setVisible(False)
         self.ep_proxy_model = qc.QSortFilterProxyModel(self)
         self.ep_proxy_model.setSourceModel(self.flow_data.entry_point_model)
         self.ep_proxy_model.setFilterKeyColumn(-1)
@@ -281,6 +313,16 @@ class FlowchartView(q.QWidget):
 
         self.graph_search_edit = q.QLineEdit(self)
         self.graph_search_edit.setPlaceholderText('Search text...')
+        self.graph_search_scope_combo = q.QComboBox(self)
+        for label, value in (
+            ('All', 'all'),
+            ('Text', 'mals'),
+            ('Parameters', 'params'),
+            ('Events', 'events'),
+            ('Switches', 'switches'),
+            ('Subflows', 'subflows'),
+        ):
+            self.graph_search_scope_combo.addItem(label, value)
         self.graph_search_prev_button = q.QToolButton(self)
         self.graph_search_prev_button.setText('Prev')
         self.graph_search_next_button = q.QToolButton(self)
@@ -316,6 +358,7 @@ class FlowchartView(q.QWidget):
         ep_widget = q.QWidget()
         ep_layout = q.QVBoxLayout(ep_widget)
         ep_layout.setContentsMargins(0, 0, 0, 0)
+        ep_layout.addWidget(self.flow_name_label)
         ep_layout.addWidget(self.entry_point_view, stretch=1)
         ep_layout.addWidget(self.ep_search)
         left_pane_splitter.addWidget(ep_widget)
@@ -328,6 +371,7 @@ class FlowchartView(q.QWidget):
         search_layout = q.QHBoxLayout()
         search_layout.setContentsMargins(4, 4, 4, 0)
         search_layout.setSpacing(4)
+        search_layout.addWidget(self.graph_search_scope_combo)
         search_layout.addWidget(self.graph_search_edit, stretch=1)
         search_layout.addWidget(self.graph_search_prev_button)
         search_layout.addWidget(self.graph_search_next_button)
@@ -360,6 +404,9 @@ class FlowchartView(q.QWidget):
         self.addAction(find_action)
 
         self.flow_data.flowDataChanged.connect(lambda reason: self.entry_point_view.clearSelection())
+        self.flow_data.flowDataChanged.connect(lambda reason: self.updateFlowNameLabel())
+        self.flow_data.fileLoaded.connect(lambda flow: self.updateFlowNameLabel())
+        self.flow_name_label.doubleClicked.connect(self.renameFlowFromHeader)
         self.entry_point_view.selectionModel().selectionChanged.connect(self.onEntryPointSelected)
         self.flow_data.entry_point_model.visibilityChanged.connect(self.onEntryPointVisibilityChanged)
         self.entry_point_view.customContextMenuRequested.connect(self.onEntryPointContextMenu)
@@ -372,8 +419,11 @@ class FlowchartView(q.QWidget):
         self.reloadedSignal.connect(self.onWebViewReloaded)
         self.readySignal.connect(self._syncDarkModeToPage)
         self.reloadedSignal.connect(self._syncDarkModeToPage)
+        self.readySignal.connect(self._syncMessageTagStylingToPage)
+        self.reloadedSignal.connect(self._syncMessageTagStylingToPage)
         self.graph_search_edit.textChanged.connect(self._onGraphSearchTextChanged)
         self.graph_search_edit.returnPressed.connect(lambda: self.view.page().runJavaScript('window.eventEditorStepSearch(1);'))
+        self.graph_search_scope_combo.currentIndexChanged.connect(lambda _: self._updateGraphSearch(scroll=True))
         self.graph_search_case_checkbox.toggled.connect(lambda _: self._updateGraphSearch(scroll=False))
         self.graph_search_prev_button.clicked.connect(lambda: self.view.page().runJavaScript('window.eventEditorStepSearch(-1);'))
         self.graph_search_next_button.clicked.connect(lambda: self.view.page().runJavaScript('window.eventEditorStepSearch(1);'))
@@ -399,6 +449,72 @@ class FlowchartView(q.QWidget):
         self.view.page().runJavaScript(
             f"(function(){{ if (document.body) document.body.classList.toggle('dark-mode', {'true' if self.dark_mode else 'false'}); }})();"
         )
+
+    def setMessageTagStylingEnabled(self, enabled: bool, refresh: bool = True) -> None:
+        self.renderMessageTagsAsStyling = bool(enabled)
+        self._syncMessageTagStylingToPage()
+        if refresh:
+            self.refreshGraphPresentation()
+
+    def setNonTextMessageTagsVisible(self, visible: bool, refresh: bool = True) -> None:
+        self.showNonTextMessageTags = bool(visible)
+        self._syncMessageTagStylingToPage()
+        if refresh:
+            self.refreshGraphPresentation()
+
+    def setMessageBlankLinesIncluded(self, included: bool, refresh: bool = True) -> None:
+        self.includeMessageBlankLines = bool(included)
+        self._syncMessageTagStylingToPage()
+        if refresh:
+            self.refreshGraphPresentation()
+
+    def setMessageBubbleBreaksShown(self, shown: bool, refresh: bool = True) -> None:
+        self.showMessageBubbleBreaks = bool(shown)
+        self._syncMessageTagStylingToPage()
+        if refresh:
+            self.refreshGraphPresentation()
+
+    def _syncMessageTagStylingToPage(self) -> None:
+        enabled = 'true' if self.renderMessageTagsAsStyling else 'false'
+        show_non_text = 'true' if self.showNonTextMessageTags else 'false'
+        include_blank_lines = 'true' if self.includeMessageBlankLines else 'false'
+        show_bubble_breaks = 'true' if self.showMessageBubbleBreaks else 'false'
+        self.view.page().runJavaScript(
+            f"(function(){{ "
+            f"if (window.eventEditorSetRenderMessageTagsAsStyling) window.eventEditorSetRenderMessageTagsAsStyling({enabled}); "
+            f"if (window.eventEditorSetShowNonTextMessageTags) window.eventEditorSetShowNonTextMessageTags({show_non_text}); "
+            f"if (window.eventEditorSetIncludeMessageBlankLines) window.eventEditorSetIncludeMessageBlankLines({include_blank_lines}); "
+            f"if (window.eventEditorSetShowMessageBubbleBreaks) window.eventEditorSetShowMessageBubbleBreaks({show_bubble_breaks}); "
+            f"}})();"
+        )
+
+    def updateFlowNameLabel(self) -> None:
+        flow = self.flow_data.flow
+        flow_name = ''
+        if flow and getattr(flow, 'flowchart', None):
+            flow_name = getattr(flow.flowchart, 'name', '') or getattr(flow, 'name', '')
+        elif flow:
+            flow_name = getattr(flow, 'name', '')
+        self.flow_name_label.setText(flow_name)
+        self.flow_name_label.setVisible(bool(flow_name))
+
+    def renameFlowFromHeader(self) -> None:
+        flow = self.flow_data.flow
+        if not flow or not getattr(flow, 'flowchart', None):
+            return
+        current_name = getattr(flow.flowchart, 'name', '') or getattr(flow, 'name', '')
+        text, ok = q.QInputDialog.getText(
+            self,
+            'Rename',
+            'Enter a new name for the flowchart.',
+            q.QLineEdit.Normal,
+            current_name,
+        )
+        if not ok or not text:
+            return
+        flow.name = text
+        flow.flowchart.name = text
+        self.flow_data.flowDataChanged.emit(FlowDataChangeReason.EventFlowRename)
 
     def setIsCurrentView(self, is_current: bool) -> None:
         self.is_current = is_current
@@ -445,6 +561,7 @@ class FlowchartView(q.QWidget):
                 self._message_archive_path,
                 message_ids,
                 show_tags=self.showMessageTags,
+                include_missing=True,
             )
             return True
         except Exception:
@@ -474,19 +591,87 @@ class FlowchartView(q.QWidget):
             choice_count = params.data.get('ChoiceNumber')
             if not isinstance(choice_count, int) or choice_count <= 0:
                 continue
-            for key, choice_value in params.data.items():
-                if not isinstance(key, str) or not key.startswith('ChoiceLabel'):
-                    continue
-                try:
-                    choice_index = int(key[len('ChoiceLabel'):])
-                except ValueError:
-                    choice_index = None
-                if choice_index is not None and choice_index > choice_count:
-                    continue
+            for choice_index in range(1, choice_count + 1):
+                choice_value = params.data.get(f'ChoiceLabel{choice_index}')
                 choice_message_id = self._resolveChoiceLabelMessageId(value, choice_value)
                 if choice_message_id:
                     message_ids.add(choice_message_id)
         return message_ids
+
+    def buildMessageLookupReport(self) -> str:
+        message_ids = sorted(self._collectMessageIds())
+        current_path = self.getMessageArchivePath()
+        lines = [f'Current Mals: {current_path or "(none)"}', '']
+        if not message_ids:
+            lines.append('No MessageId parameters are currently referenced by this flow.')
+            return '\n'.join(lines)
+
+        if not current_path:
+            lines.append('No current Mals archive is selected.')
+            lines.append('')
+            lines.append('Referenced MSBTs:')
+            for prefix in sorted(mals._group_message_ids_by_prefix(message_ids).keys()):
+                lines.append(f'- {prefix}')
+            return '\n'.join(lines)
+
+        self.updateMessageLookup(report_errors=False)
+        missing_by_prefix: typing.Dict[str, typing.Dict[str, typing.List[str]]] = {}
+        special_characters: typing.Dict[str, typing.Set[str]] = {}
+        for message_id in message_ids:
+            if ':' not in message_id:
+                missing_by_prefix.setdefault('(invalid MessageId)', {}).setdefault('Malformed MessageId', []).append(message_id)
+                continue
+            prefix, label = message_id.split(':', 1)
+            text = self._message_lookup.get(message_id)
+            if text == mals.MSBT_NOT_FOUND_TEXT:
+                missing_by_prefix.setdefault(prefix, {}).setdefault('MSBT not found in Mals', []).append(label)
+                continue
+            if text == mals.MESSAGE_ID_NOT_FOUND_TEXT or text is None:
+                missing_by_prefix.setdefault(prefix, {}).setdefault('MessageID not found in provided MSBT', []).append(label)
+                continue
+            special = {
+                f'U+{ord(ch):04X}'
+                for ch in text
+                if self._isSpecialPreviewCharacter(ch)
+            }
+            if special:
+                special_characters[message_id] = special
+
+        if not missing_by_prefix:
+            lines.append('No missing MSBTs or MessageIDs were found for the current graph.')
+        else:
+            lines.append('Missing MSBTs and MessageIDs grouped by MSBT:')
+            for prefix in sorted(missing_by_prefix.keys()):
+                lines.append('')
+                lines.append(prefix)
+                for reason in sorted(missing_by_prefix[prefix].keys()):
+                    lines.append(f'  {reason}:')
+                    for label in sorted(missing_by_prefix[prefix][reason]):
+                        lines.append(f'    - {label}')
+
+        if special_characters:
+            lines.append('')
+            lines.append('Special characters outside the usual text preview range were found:')
+            for message_id in sorted(special_characters.keys()):
+                chars = ', '.join(sorted(special_characters[message_id]))
+                lines.append(f'- {message_id}: {chars}')
+            lines.append('')
+            lines.append('Possible rendering strategies: map known codes to named icons, show fallback labels, or add custom font/sprite support.')
+        return '\n'.join(lines)
+
+    def _isSpecialPreviewCharacter(self, char: str) -> bool:
+        codepoint = ord(char)
+        if codepoint in (0x09, 0x0A, 0x0D):
+            return False
+        if codepoint < 0x20:
+            return True
+        if 0xE000 <= codepoint <= 0xF8FF:
+            return True
+        if 0xF0000 <= codepoint <= 0xFFFFD:
+            return True
+        if 0x100000 <= codepoint <= 0x10FFFD:
+            return True
+        return codepoint == 0xFFFD
 
     def _resolveChoiceLabelMessageId(self, base_message_id: typing.Any, choice_value: typing.Any) -> typing.Optional[str]:
         if isinstance(choice_value, str):
@@ -532,33 +717,36 @@ class FlowchartView(q.QWidget):
             if not isinstance(choice_count, int) or choice_count <= 0:
                 continue
             choice_texts: typing.Dict[str, str] = {}
-            for key, choice_value in params.items():
-                if not isinstance(key, str) or not key.startswith('ChoiceLabel'):
-                    continue
-                try:
-                    choice_index = int(key[len('ChoiceLabel'):])
-                except ValueError:
-                    choice_index = None
-                if choice_index is not None and choice_index > choice_count:
-                    continue
+            choice_items: typing.List[typing.Dict[str, typing.Any]] = []
+            for choice_index in range(1, choice_count + 1):
+                key = f'ChoiceLabel{choice_index}'
+                choice_value = params.get(key)
                 choice_message_id = self._resolveChoiceLabelMessageId(message_id, choice_value)
                 if not choice_message_id:
                     continue
                 choice_text = self._message_lookup.get(choice_message_id)
-                if choice_text:
+                if choice_text is not None:
                     choice_texts[key] = choice_text
+                    choice_items.append({
+                        'index': choice_index,
+                        'message_id': choice_message_id,
+                        'text': choice_text,
+                    })
             if choice_texts:
                 node_data['_choice_label_texts'] = choice_texts
+            if choice_items:
+                node_data['_choice_texts'] = choice_items
 
     def _onGraphSearchTextChanged(self, _text: str) -> None:
         self._updateGraphSearch(scroll=True)
 
     def _updateGraphSearch(self, scroll: bool) -> None:
         text = json.dumps(self.graph_search_edit.text())
+        scope = json.dumps(self.graph_search_scope_combo.currentData() or 'all')
         case_insensitive = 'true' if self.graph_search_case_checkbox.isChecked() else 'false'
         should_scroll = 'true' if scroll else 'false'
         self.view.page().runJavaScript(
-            f'window.eventEditorSetSearchQuery({text}, {case_insensitive}, {should_scroll});'
+            f'window.eventEditorSetSearchQuery({text}, {case_insensitive}, {should_scroll}, {scope});'
         )
 
     def _updateSearchControls(self, count: int, index: int) -> None:
@@ -928,6 +1116,8 @@ class FlowchartView(q.QWidget):
             return
         if self.is_current:
             if self.pending_reveal_event is None and self.pending_reveal_node_id is None:
+                if not bool(reason & FlowDataChangeReason.Reset):
+                    self.web_object.preserveViewportRequested.emit()
                 self.web_object.fastGraphReloadRequested.emit()
             self.web_object.flowDataChanged.emit()
         else:
@@ -945,7 +1135,14 @@ class FlowchartView(q.QWidget):
         idx = selected_rows[0]
         if not idx.isValid():
             return
-        self.selectRequested.emit(-1000-self.ep_proxy_model.mapToSource(idx).row())
+        source_row = self.ep_proxy_model.mapToSource(idx).row()
+        target_node_id = -1000 - source_row
+        if self.flow_data.entry_point_model.isHiddenRow(source_row):
+            self.pending_reveal_node_id = target_node_id
+            self.pending_reveal_duration_ms = 500
+            self.flow_data.entry_point_model.setRowsHidden([source_row], False)
+            return
+        self.selectRequested.emit(target_node_id)
 
     def onEntryPointVisibilityChanged(self) -> None:
         self.web_object.entryPointFilterStateChanged.emit(bool(self.flow_data.entry_point_model.hiddenEntryPointNames()))
@@ -953,6 +1150,63 @@ class FlowchartView(q.QWidget):
         self.web_object.fastGraphReloadRequested.emit()
         self.web_object.preserveViewportRequested.emit()
         self.web_object.flowDataChanged.emit()
+
+    def webGoToSubflowEntryPoint(self, node_id: int) -> None:
+        if not self.flow_data.flow or not self.flow_data.flow.flowchart:
+            return
+        flow = self.flow_data.flow
+        flowchart = flow.flowchart
+        if not (0 <= node_id < len(flowchart.events)):
+            return
+
+        event = flowchart.events[node_id]
+        event_data = getattr(event, 'data', None)
+        if not isinstance(event_data, SubFlowEvent):
+            return
+
+        entry_point_name = event_data.entry_point_name
+        if not entry_point_name:
+            return
+
+        local_flow_names = {
+            name for name in (
+                getattr(flow, 'name', ''),
+                getattr(flowchart, 'name', ''),
+            ) if name
+        }
+        target_flow_name = event_data.res_flowchart_name or getattr(flowchart, 'name', '') or getattr(flow, 'name', '')
+        if event_data.res_flowchart_name and target_flow_name not in local_flow_names:
+            self.externalSubflowOpenRequested.emit(target_flow_name, entry_point_name)
+            return
+
+        self.selectEntryPointByName(entry_point_name)
+
+    def selectEntryPointByName(self, entry_point_name: str) -> None:
+        if not self.flow_data.flow or not self.flow_data.flow.flowchart:
+            return
+        flowchart = self.flow_data.flow.flowchart
+        for row, entry_point in enumerate(flowchart.entry_points):
+            if entry_point.name != entry_point_name:
+                continue
+
+            source_index = self.flow_data.entry_point_model.index(row, 0)
+            mapped_index = self.ep_proxy_model.mapFromSource(source_index)
+            if mapped_index.isValid():
+                self.entry_point_view.setCurrentIndex(mapped_index)
+                self.entry_point_view.scrollTo(mapped_index)
+
+            target_node_id = -1000 - row
+            self.pending_reveal_node_id = target_node_id
+            if self.flow_data.entry_point_model.setRowsHidden([row], False):
+                return
+            self.selectRequested.emit(target_node_id)
+            return
+
+        q.QMessageBox.information(
+            self,
+            'Go to entry point',
+            f'This file does not contain an entry point named "{entry_point_name}".',
+        )
 
     def webShowOnlyConnectedEvents(self, node_id: int) -> None:
         rows_to_show = set(self._connectedEntryPointRowsForNode(node_id))
@@ -1098,6 +1352,21 @@ class FlowchartView(q.QWidget):
             return
         self.flow_data.entry_point_model.setRowsHidden(rows, hidden)
 
+    def showOnlySelectedEntryPoints(self) -> None:
+        selected_rows = self._getSelectedEntryPointRowsFromView()
+        all_rows = self._allEntryPointRows()
+        if not selected_rows or not all_rows:
+            return
+
+        selected_set = set(selected_rows)
+        rows_to_hide = [row for row in all_rows if row not in selected_set]
+        model = self.flow_data.entry_point_model
+        changed = False
+        changed = model.setRowsHidden(selected_rows, False) or changed
+        changed = model.setRowsHidden(rows_to_hide, True) or changed
+        if not changed:
+            self.onEntryPointVisibilityChanged()
+
     def deleteSelectedEntryPoints(self) -> None:
         if not self.flow_data.flow or not self.flow_data.flow.flowchart:
             return
@@ -1149,6 +1418,8 @@ class FlowchartView(q.QWidget):
                 menu.addAction(toggle_label, self.toggleSelectedEntryPointsVisibility)
             else:
                 menu.addAction(toggle_label, lambda checked=False, hidden=hidden_target: self.setSelectedEntryPointsHidden(hidden))
+            menu.addAction('Show only selected', self.showOnlySelectedEntryPoints)
+            menu.addAction('Show All', lambda checked=False: self.webShowAllEvents())
             menu.addSeparator()
             menu.addAction('&Copy', self.copySelectedEntryPoints)
         menu.addAction('&Paste', self.pasteEntryPoints)

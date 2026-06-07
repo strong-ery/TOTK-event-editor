@@ -16,12 +16,37 @@ let pendingLoadFinalizeToken = 0;
 let nextGraphTransitionMs = GRAPH_TRANSITION_MS;
 let graphSearchQuery = '';
 let graphSearchCaseInsensitive = true;
+let graphSearchScope = 'all';
 let graphSearchMatches = [];
 let graphSearchIndex = -1;
+let renderMessageTagsAsStyling = true;
+let showNonTextMessageTags = true;
+let includeMessageBlankLines = true;
+let showMessageBubbleBreaks = true;
 const LABEL_WRAP_LENGTH = 44;
 const MESSAGE_WRAP_LENGTH = 62;
+const MESSAGE_BUBBLE_SOURCE_LINE_LIMIT = 3;
 const MESSAGE_SEPARATOR = '-'.repeat(30);
+const MESSAGE_BLANK_LINE = '\u00A0';
+const MESSAGE_BUBBLE_BREAK_LINE = '\u2063';
 const MESSAGE_TAG_REGEX = /(\{\{[^{}\n]+\}\})/g;
+const MESSAGE_TAG_TOKEN_REGEX = /^\{\{[^{}\n]+\}\}$/;
+const WRAP_TOKEN_REGEX = /\{\{[^{}\n]+\}\}|[ \t]+|[^\s{}]+/g;
+const MESSAGE_TAG_STYLE_KEYS = ['fill', 'font-weight', 'font-style', 'font-size', 'font-family'];
+const MESSAGE_TAG_DEFAULT_COLOR = '#fffeed';
+const TOTK_MESSAGE_TAG_COLORS = {
+  '-1': MESSAGE_TAG_DEFAULT_COLOR,
+  '0': '#ff6634',
+  '1': '#58d7ee',
+  '2': '#b8bcc4',
+  '3': '#f06a6a',
+  '4': '#72d180',
+  '5': '#d49bff',
+};
+const MESSAGE_TAG_COLOR_PALETTE = [
+  '#fffeed', '#f06a6a', '#72d180', '#67b7ff', '#f2c55c', '#d49bff',
+  '#74d7d0', '#ff9e64', '#cfd7df', '#9ec5ff', '#ffd1dc', '#d5f06a',
+];
 
 const WHITELISTED_PARAMS = new Set(['MessageId', 'ASName']);
 
@@ -29,21 +54,108 @@ function isMultiSelectEvent(event) {
   return !!(event && (event.ctrlKey || event.metaKey));
 }
 
-function formatNodeParamValue(value) {
+function formatNodeParamValue(value, key=null) {
+  if (typeof key === 'string' && /^ChoiceLabel\d+$/i.test(key)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return Math.trunc(value).toString().padStart(4, '0');
+    }
+    if (typeof value === 'string' && /^\s*\d+\s*$/.test(value)) {
+      return value.trim().padStart(4, '0');
+    }
+  }
   return typeof value === 'number' ? value.toFixed(6).replace(/\.?0*$/, '') : `${value}`;
+}
+
+function normalizeMessageLine(line) {
+  return `${line}`
+    .replace(/([.!?…])([A-Z])/g, '$1 $2')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+function pushMessageBubbleBreak(lines) {
+  if (!lines.length || lines[lines.length - 1] === MESSAGE_BUBBLE_BREAK_LINE) {
+    return;
+  }
+  lines.push(MESSAGE_BUBBLE_BREAK_LINE);
 }
 
 function normalizeMessageText(text) {
   const normalized = `${text}`.replace(/\r\n/g, '\n').trim();
-  const paragraphs = normalized
-    .split(/\n\s*\n+/)
-    .map((paragraph) => paragraph
-      .replace(/\s*\n\s*/g, ' ')
-      .replace(/([.!?…])([A-Z])/g, '$1 $2')
-      .replace(/\s+/g, ' ')
-      .trim())
-    .filter((paragraph) => paragraph.length > 0);
-  return paragraphs.join('\n\n');
+  if (!normalized) {
+    return '';
+  }
+
+  const lines = [];
+  let sourceTextLineCount = 0;
+  let inBlankLineGroup = false;
+  for (const rawLine of normalized.split('\n')) {
+    const line = normalizeMessageLine(rawLine);
+    if (!line) {
+      if (includeMessageBlankLines) {
+        lines.push(MESSAGE_BLANK_LINE);
+      }
+      if (showMessageBubbleBreaks && !inBlankLineGroup && sourceTextLineCount > 0) {
+        pushMessageBubbleBreak(lines);
+      }
+      sourceTextLineCount = 0;
+      inBlankLineGroup = true;
+      continue;
+    }
+
+    inBlankLineGroup = false;
+    lines.push(line);
+    if (messageLineVisibleText(line)) {
+      sourceTextLineCount += 1;
+    }
+
+    const forcedBreak = lineHasPageBreakTag(line);
+    if (showMessageBubbleBreaks && (forcedBreak || sourceTextLineCount >= MESSAGE_BUBBLE_SOURCE_LINE_LIMIT)) {
+      pushMessageBubbleBreak(lines);
+      sourceTextLineCount = 0;
+    }
+  }
+
+  while (lines.length && (lines[lines.length - 1] === MESSAGE_BLANK_LINE || lines[lines.length - 1] === MESSAGE_BUBBLE_BREAK_LINE)) {
+    lines.pop();
+  }
+  return lines.join('\n');
+}
+
+function isMessageTagToken(token) {
+  return MESSAGE_TAG_TOKEN_REGEX.test(token);
+}
+
+function isWhitespaceToken(token) {
+  return /^[ \t]+$/.test(token);
+}
+
+function isHiddenMessageFormatToken(token) {
+  return renderMessageTagsAsStyling && isMessageTagToken(token) && isMessageFormatTag(parseMessageTag(token));
+}
+
+function isMessageTagHidden(tag) {
+  return (renderMessageTagsAsStyling && isMessageFormatTag(tag)) ||
+    (!showNonTextMessageTags && !isMessageFormatTag(tag));
+}
+
+function isHiddenMessageTagToken(token) {
+  return isMessageTagToken(token) && isMessageTagHidden(parseMessageTag(token));
+}
+
+function isMessagePageBreakTagToken(token) {
+  return isMessageTagToken(token) && parseMessageTag(token).name === 'pageBreak';
+}
+
+function messageTokenVisibleText(token) {
+  if (!isMessageTagToken(token)) {
+    return token;
+  }
+  const tag = parseMessageTag(token);
+  if (isMessageTagHidden(tag)) {
+    return '';
+  }
+  return renderMessageTagsAsStyling ? formatMessageTagPreview(tag) : token;
 }
 
 function wrapLabelText(text, maxLength=LABEL_WRAP_LENGTH) {
@@ -52,94 +164,138 @@ function wrapLabelText(text, maxLength=LABEL_WRAP_LENGTH) {
   for (const sourceLine of normalized.split('\n')) {
     const line = sourceLine.trim();
     if (!line) {
-      wrappedLines.push('');
+      if (includeMessageBlankLines) {
+        wrappedLines.push(MESSAGE_BLANK_LINE);
+      }
       continue;
     }
 
     let current = '';
-    let previousWord = '';
-    const words = line.match(/\{\{[^{}\n]+\}\}|[^\s]+/g) || [];
-    for (let index = 0; index < words.length; index++) {
-      const word = words[index];
-      const startsNewSentence = index > 0 && /[.!?…]["')\]]*$/.test(previousWord);
-      if (startsNewSentence && current) {
-        let fittingSentenceWords = 0;
-        let probe = current;
-        for (let lookahead = index; lookahead < words.length; lookahead++) {
-          const lookaheadCandidate = `${probe} ${words[lookahead]}`;
-          if (lookaheadCandidate.length > maxLength) {
-            break;
-          }
-          fittingSentenceWords += 1;
-          probe = lookaheadCandidate;
-        }
-        if (fittingSentenceWords > 0 && fittingSentenceWords <= 4) {
-          wrappedLines.push(current);
-          current = '';
-        }
+    let currentVisibleLength = 0;
+    let currentHasHiddenFormatTag = false;
+    let pendingSpace = '';
+    const flushCurrent = () => {
+      const trimmed = current.replace(/[ \t]+$/, '');
+      if (trimmed && (currentVisibleLength > 0 || currentHasHiddenFormatTag)) {
+        wrappedLines.push(trimmed);
       }
+      current = '';
+      currentVisibleLength = 0;
+      currentHasHiddenFormatTag = false;
+      pendingSpace = '';
+    };
 
-      if (!current) {
-        const isTagToken = /^\{\{[^{}\n]+\}\}$/.test(word);
-        if (isTagToken || word.length <= maxLength) {
-          current = word;
-        } else {
-          for (let i = 0; i < word.length; i += maxLength) {
-            wrappedLines.push(word.slice(i, i + maxLength));
-          }
+    const tokens = line.match(WRAP_TOKEN_REGEX) || [];
+    for (const token of tokens) {
+      if (isWhitespaceToken(token)) {
+        if (current) {
+          pendingSpace = ' ';
         }
-        previousWord = word;
         continue;
       }
 
-      const candidate = `${current} ${word}`;
-      if (candidate.length <= maxLength) {
-        current = candidate;
-      } else {
-        const currentWords = current.split(/\s+/);
-        const trailingWord = currentWords[currentWords.length - 1] || '';
-        const canKeepPairTogether = !startsNewSentence
-          && trailingWord.length > 0 && trailingWord.length <= 2
-          && `${trailingWord} ${word}`.length <= maxLength
-          && currentWords.length > 1;
-        const punctuationIndex = currentWords.findIndex((entry) => /(?:,|;|:|\.{3}|…)$/.test(entry));
-        const punctuationTail = punctuationIndex >= 0 ? currentWords.slice(punctuationIndex + 1) : [];
-        const shouldBreakAfterPunctuation = punctuationIndex >= 0
-          && punctuationTail.length > 0
-          && punctuationTail.length <= 2;
-        if (shouldBreakAfterPunctuation) {
-          const previousLine = currentWords.slice(0, punctuationIndex + 1).join(' ');
-          if (previousLine) {
-            wrappedLines.push(previousLine);
-          }
-          current = punctuationTail.join(' ');
-        } else if (canKeepPairTogether) {
-          const previousLine = currentWords.slice(0, -1).join(' ');
-          if (previousLine) {
-            wrappedLines.push(previousLine);
-          }
-          current = `${trailingWord} ${word}`;
-        } else {
-          wrappedLines.push(current);
-          const isTagToken = /^\{\{[^{}\n]+\}\}$/.test(word);
-          if (isTagToken || word.length <= maxLength) {
-            current = word;
-          } else {
-            for (let i = 0; i < word.length; i += maxLength) {
-              wrappedLines.push(word.slice(i, i + maxLength));
-            }
-            current = '';
-          }
+      const visibleText = messageTokenVisibleText(token);
+      const visibleLength = visibleText.length;
+      const hiddenTagToken = isHiddenMessageTagToken(token);
+
+      if (hiddenTagToken) {
+        if (isHiddenMessageFormatToken(token) || isMessagePageBreakTagToken(token)) {
+          currentHasHiddenFormatTag = true;
         }
+        current += token;
+        continue;
       }
-      previousWord = word;
+
+      const separator = pendingSpace && currentVisibleLength > 0 ? pendingSpace : '';
+      const candidateVisibleLength = currentVisibleLength + separator.length + visibleLength;
+      if (current && visibleLength > 0 && candidateVisibleLength > maxLength) {
+        flushCurrent();
+      }
+
+      if (!isMessageTagToken(token) && visibleLength > maxLength && !current) {
+        for (let i = 0; i < token.length; i += maxLength) {
+          wrappedLines.push(token.slice(i, i + maxLength));
+        }
+        continue;
+      }
+
+      if (pendingSpace && currentVisibleLength > 0) {
+        current += pendingSpace;
+        currentVisibleLength += pendingSpace.length;
+      }
+      pendingSpace = '';
+      current += token;
+      currentVisibleLength += visibleLength;
     }
 
-    if (current) {
-      wrappedLines.push(current);
-    }
+    flushCurrent();
   }
   return wrappedLines;
+}
+
+function messageLineVisibleText(line) {
+  return `${line}`.split(MESSAGE_TAG_REGEX)
+    .filter((part) => part.length > 0 && !MESSAGE_TAG_TOKEN_REGEX.test(part))
+    .join('')
+    .split(MESSAGE_BLANK_LINE).join('')
+    .split(MESSAGE_BUBBLE_BREAK_LINE).join('')
+    .trim();
+}
+
+function messageLineLayoutText(line) {
+  if (line === MESSAGE_BLANK_LINE || line === MESSAGE_BUBBLE_BREAK_LINE) {
+    return line;
+  }
+
+  const parts = `${line}`.split(MESSAGE_TAG_REGEX).filter((part) => part.length > 0);
+  const layoutText = parts.map((part) => {
+    if (!MESSAGE_TAG_TOKEN_REGEX.test(part)) {
+      return part;
+    }
+    return messageTokenVisibleText(part);
+  }).join('');
+  if (!layoutText && parts.some((part) => MESSAGE_TAG_TOKEN_REGEX.test(part))) {
+    return MESSAGE_BLANK_LINE;
+  }
+  return layoutText;
+}
+
+function getNodeLayoutLabel(label) {
+  return `${label}`.split('\n').map((line) => messageLineLayoutText(line)).join('\n');
+}
+
+function lineHasPageBreakTag(line) {
+  return `${line}`.split(MESSAGE_TAG_REGEX)
+    .some((part) => isMessagePageBreakTagToken(part));
+}
+
+function applyTextBubbleBreaks(lines) {
+  if (!showMessageBubbleBreaks) {
+    return lines;
+  }
+
+  const withBreaks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    withBreaks.push(line);
+    if (line === MESSAGE_BLANK_LINE || line === MESSAGE_BUBBLE_BREAK_LINE) {
+      continue;
+    }
+
+    const hasForcedBreak = lineHasPageBreakTag(line);
+    const nextLine = index + 1 < lines.length ? lines[index + 1] : '';
+    const nextLineAlreadyBreaks = nextLine === MESSAGE_BLANK_LINE ||
+      nextLine === MESSAGE_BUBBLE_BREAK_LINE ||
+      lineHasPageBreakTag(nextLine);
+    if (hasForcedBreak && !nextLineAlreadyBreaks) {
+      withBreaks.push(MESSAGE_BUBBLE_BREAK_LINE);
+    }
+  }
+
+  while (withBreaks.length && withBreaks[withBreaks.length - 1] === MESSAGE_BUBBLE_BREAK_LINE) {
+    withBreaks.pop();
+  }
+  return withBreaks;
 }
 
 function appendWrappedLabelLine(label, prefix, text) {
@@ -154,8 +310,32 @@ function appendWrappedLabelLine(label, prefix, text) {
   return nextLabel;
 }
 
+function appendWrappedLabelLineWithIndent(label, prefix, text, continuationPrefix='  ') {
+  const wrapped = wrapLabelText(text);
+  if (!wrapped.length) {
+    return `${label}\n${prefix}`;
+  }
+  let nextLabel = `${label}\n${prefix}${wrapped[0]}`;
+  for (const continuation of wrapped.slice(1)) {
+    nextLabel += `\n${continuationPrefix}${continuation}`;
+  }
+  return nextLabel;
+}
+
+function appendMessageIdBlock(label, messageId) {
+  const rawMessageId = formatNodeParamValue(messageId);
+  const separatorIndex = rawMessageId.indexOf(':');
+  const msbtPath = separatorIndex >= 0 ? rawMessageId.slice(0, separatorIndex) : '';
+  const labelId = separatorIndex >= 0 ? rawMessageId.slice(separatorIndex + 1) : rawMessageId;
+  let nextLabel = `${label}\nMessage:`;
+  if (msbtPath) {
+    nextLabel = appendWrappedLabelLineWithIndent(nextLabel, '  MSBT: ', msbtPath, '        ');
+  }
+  return appendWrappedLabelLineWithIndent(nextLabel, '  ID:   ', labelId, '        ');
+}
+
 function appendMessageBlock(label, text) {
-  const wrapped = wrapLabelText(text, MESSAGE_WRAP_LENGTH);
+  const wrapped = applyTextBubbleBreaks(wrapLabelText(text, MESSAGE_WRAP_LENGTH));
   if (!wrapped.length) {
     return label;
   }
@@ -166,6 +346,206 @@ function appendMessageBlock(label, text) {
   }
   nextLabel += `\n\n${MESSAGE_SEPARATOR}\n`;
   return nextLabel;
+}
+
+function appendChoiceBlock(label, choices) {
+  if (!choices || !choices.length) {
+    return label;
+  }
+
+  let nextLabel = label;
+  for (const choice of choices) {
+    const choiceIndex = choice && choice.index != null ? choice.index : '';
+    const choiceText = choice && typeof choice.text === 'string' ? normalizeMessageText(choice.text) : '';
+    if (!choiceText) {
+      continue;
+    }
+    const wrappedChoice = applyTextBubbleBreaks(wrapLabelText(choiceText));
+    if (!wrappedChoice.length) {
+      continue;
+    }
+    nextLabel = `${nextLabel}\nChoice ${choiceIndex}: ${wrappedChoice[0]}`;
+    for (const continuation of wrappedChoice.slice(1)) {
+      nextLabel += `\n${continuation}`;
+    }
+    nextLabel += `\n${MESSAGE_SEPARATOR}`;
+  }
+  return nextLabel;
+}
+
+function parseMessageTag(rawTag) {
+  const inner = `${rawTag}`.replace(/^\{\{/, '').replace(/\}\}$/, '').trim();
+  const firstSpace = inner.search(/\s/);
+  const name = firstSpace >= 0 ? inner.slice(0, firstSpace) : inner;
+  const argText = firstSpace >= 0 ? inner.slice(firstSpace + 1) : '';
+  const args = {};
+  const argRegex = /([A-Za-z0-9_:-]+)="([^"]*)"/g;
+  let match;
+  while ((match = argRegex.exec(argText)) !== null) {
+    args[match[1]] = match[2];
+  }
+  return { raw: rawTag, name, args };
+}
+
+function normalizeMessageTagColorId(id) {
+  if (id == null) {
+    return null;
+  }
+  const numericId = parseInt(id, 10);
+  if (Number.isNaN(numericId)) {
+    return null;
+  }
+  if (numericId === 65535) {
+    return '-1';
+  }
+  return `${numericId}`;
+}
+
+function messageTagColor(id) {
+  const colorId = normalizeMessageTagColorId(id);
+  if (colorId == null) {
+    return '#b8bcc4';
+  }
+  if (TOTK_MESSAGE_TAG_COLORS[colorId]) {
+    return TOTK_MESSAGE_TAG_COLORS[colorId];
+  }
+  const numericId = parseInt(id, 10);
+  return MESSAGE_TAG_COLOR_PALETTE[((numericId % MESSAGE_TAG_COLOR_PALETTE.length) + MESSAGE_TAG_COLOR_PALETTE.length) % MESSAGE_TAG_COLOR_PALETTE.length];
+}
+
+function messageTagFontStyle(face) {
+  if (!face) {
+    return {};
+  }
+  const normalized = `${face}`.toLowerCase();
+  if (normalized === 'default' || normalized === '-1') {
+    return {};
+  }
+  if (normalized.includes('bold') || normalized.includes('title')) {
+    return { 'font-weight': '700' };
+  }
+  if (normalized.includes('thin')) {
+    return { 'font-weight': '300' };
+  }
+  if (normalized.includes('ancient')) {
+    return { 'font-family': 'Georgia, serif', 'font-weight': '600' };
+  }
+  return {};
+}
+
+function messageTagSizeStyle(value) {
+  const numericValue = parseInt(value, 10);
+  if (Number.isNaN(numericValue)) {
+    return {};
+  }
+  const clamped = Math.max(9, Math.min(28, 14 * (numericValue / 100)));
+  return { 'font-size': `${clamped}px` };
+}
+
+function formatMessageTagPreview(tag) {
+  if (tag.name === 'icon') {
+    return `[${tag.args.type || 'icon'}]`;
+  }
+  if (tag.name === 'color') {
+    return `[color ${tag.args.id || '?'}]`;
+  }
+  if (tag.name === 'font') {
+    return `[font ${tag.args.face || '?'}]`;
+  }
+  if (tag.name === 'size') {
+    return `[size ${tag.args.value || '?'}]`;
+  }
+  if (tag.name === 'delay') {
+    return `[delay ${tag.args.frames || '?'}f]`;
+  }
+  if (/^delay(\d+)$/.test(tag.name)) {
+    return `[delay ${tag.name.replace('delay', '')}f]`;
+  }
+  if (tag.name === 'pageBreak') {
+    return '[page]';
+  }
+  if (tag.name === 'resetFontStyle') {
+    return '[/style]';
+  }
+  if (tag.name === 'setEmotion') {
+    return `[emotion ${tag.args.emotion || '?'}]`;
+  }
+  if (tag.name === 'setVoice') {
+    return tag.args.asset ? `[voice ${tag.args.asset}]` : '[voice]';
+  }
+  if (tag.name.startsWith('tag:')) {
+    return `[${tag.name}]`;
+  }
+  return `[${tag.name}]`;
+}
+
+function isMessageFormatTag(tag) {
+  return ['color', 'font', 'size', 'setItalicFont', 'resetFontStyle'].includes(tag.name);
+}
+
+function applySvgTextStyle(element, style) {
+  for (const key of MESSAGE_TAG_STYLE_KEYS) {
+    if (style[key]) {
+      element.setAttribute(key, style[key]);
+    }
+  }
+}
+
+function hasSvgTextStyle(style) {
+  return MESSAGE_TAG_STYLE_KEYS.some((key) => !!style[key]);
+}
+
+function mutateMessageTextStyleForTag(tag, currentStyle) {
+  const markerStyle = { fill: '#b8bcc4', 'font-weight': '600' };
+  if (tag.name === 'color') {
+    const colorId = normalizeMessageTagColorId(tag.args.id);
+    const color = messageTagColor(tag.args.id);
+    markerStyle.fill = color;
+    if (colorId === '-1') {
+      delete currentStyle.fill;
+      delete currentStyle._colorId;
+    } else {
+      currentStyle.fill = color;
+      currentStyle._colorId = colorId;
+    }
+  } else if (tag.name === 'font') {
+    const fontStyle = messageTagFontStyle(tag.args.face);
+    Object.assign(markerStyle, fontStyle);
+    const fontFace = tag.args.face || '';
+    const fontFaceKey = `${fontFace}`.toLowerCase();
+    if (fontFaceKey === 'default' || fontFaceKey === '-1') {
+      delete currentStyle['font-weight'];
+      delete currentStyle['font-family'];
+      delete currentStyle._fontFace;
+    } else {
+      delete currentStyle['font-weight'];
+      delete currentStyle['font-family'];
+      Object.assign(currentStyle, fontStyle);
+      currentStyle._fontFace = fontFace;
+    }
+  } else if (tag.name === 'size') {
+    const sizeStyle = messageTagSizeStyle(tag.args.value);
+    Object.assign(markerStyle, sizeStyle);
+    if (!Object.keys(sizeStyle).length) {
+      delete currentStyle['font-size'];
+      delete currentStyle._sizeValue;
+    } else {
+      Object.assign(currentStyle, sizeStyle);
+      currentStyle._sizeValue = tag.args.value;
+    }
+  } else if (tag.name === 'setItalicFont') {
+    if (currentStyle['font-style'] === 'italic') {
+      delete currentStyle['font-style'];
+    } else {
+      currentStyle['font-style'] = 'italic';
+      markerStyle['font-style'] = 'italic';
+    }
+  } else if (tag.name === 'resetFontStyle') {
+    for (const key of Object.keys(currentStyle)) {
+      delete currentStyle[key];
+    }
+  }
+  return markerStyle;
 }
 
 function getElementCenterInViewport(element) {
@@ -200,12 +580,11 @@ function getMessageText(node) {
   return normalizeMessageText(node.data._message_text);
 }
 
-function getChoiceLabelText(node, key) {
-  if (!node || !node.data || !node.data._choice_label_texts) {
-    return '';
+function getChoiceItems(node) {
+  if (!node || !node.data || !Array.isArray(node.data._choice_texts)) {
+    return [];
   }
-  const text = node.data._choice_label_texts[key];
-  return typeof text === 'string' ? normalizeMessageText(text) : '';
+  return node.data._choice_texts;
 }
 
 function getNodeLabel(node) {
@@ -236,26 +615,23 @@ function getNodeLabel(node) {
       if (key === 'IsWaitFinish') {
         continue;
       }
-      label = appendWrappedLabelLine(label, `${key}: `, formatNodeParamValue(value));
-      if (key === 'MessageId' && eventMessagesVisible) {
-        const messageText = getMessageText(node);
-        if (messageText) {
-          label = appendMessageBlock(label, messageText);
-        }
-      } else if (eventMessagesVisible && key.startsWith('ChoiceLabel')) {
-        const choiceText = getChoiceLabelText(node, key);
-        if (choiceText) {
-          label = appendMessageBlock(label, choiceText);
-        }
+      if (key === 'MessageId') {
+        label = appendMessageIdBlock(label, value);
+        continue;
       }
+      label = appendWrappedLabelLine(label, `${key}: `, formatNodeParamValue(value, key));
     }
   }
-  else if (eventMessagesVisible && node.data && node.data.params && node.data.params.MessageId) {
-    label = appendWrappedLabelLine(label, 'MessageId: ', formatNodeParamValue(node.data.params.MessageId));
+
+  if (eventMessagesVisible && node.data && node.data.params && node.data.params.MessageId) {
+    if (!eventParamVisible) {
+      label = appendMessageIdBlock(label, node.data.params.MessageId);
+    }
     const messageText = getMessageText(node);
     if (messageText) {
       label = appendMessageBlock(label, messageText);
     }
+    label = appendChoiceBlock(label, getChoiceItems(node));
   }
   return label;
 }
@@ -355,6 +731,11 @@ function handleNodeContextMenu(id) {
     actions.push({ divider: true });
   }
 
+  if (classes.includes('sub_flow')) {
+    addAction('Go to entry point', () => widget.goToSubflowEntryPoint(idx));
+    actions.push({ divider: true });
+  }
+
   addAction('Select connected events', () => graph.selectConnected(id));
   if (hasHiddenEntryPoints) {
     addAction('Show all events', () => widget.showAllEventsFromNode(idx));
@@ -448,14 +829,46 @@ class Renderer {
     });
   }
 
+  _restoreRawNodeLabels(visibleGraph) {
+    this.svgGroup.selectAll('.node').each(function(id) {
+      const node = visibleGraph.node(id);
+      const rawLabel = node && node.rawLabel;
+      if (typeof rawLabel !== 'string') {
+        return;
+      }
+
+      const rawLines = rawLabel.split('\n');
+      const tspans = this.querySelectorAll('.label text tspan');
+      if (rawLines.length !== tspans.length) {
+        return;
+      }
+      rawLines.forEach((line, index) => {
+        tspans[index].textContent = line;
+      });
+    });
+  }
+
   _styleMessageTags() {
     this.svgGroup.selectAll('.node .label text').each(function() {
       const textNode = this;
       const tspans = textNode.querySelectorAll('tspan');
+      const currentStyle = {};
       tspans.forEach((lineTspan) => {
         const line = lineTspan.textContent || '';
+        if (line === MESSAGE_BLANK_LINE || line === MESSAGE_BUBBLE_BREAK_LINE) {
+          lineTspan.textContent = MESSAGE_BLANK_LINE;
+          lineTspan.setAttribute('fill-opacity', '0');
+          lineTspan.setAttribute('class', line === MESSAGE_BUBBLE_BREAK_LINE ? 'message-bubble-break' : 'message-blank-line');
+          if (line === MESSAGE_BUBBLE_BREAK_LINE) {
+            lineTspan.setAttribute('font-size', '7px');
+          }
+          return;
+        }
         if (!MESSAGE_TAG_REGEX.test(line)) {
           MESSAGE_TAG_REGEX.lastIndex = 0;
+          if (renderMessageTagsAsStyling && hasSvgTextStyle(currentStyle)) {
+            applySvgTextStyle(lineTspan, currentStyle);
+          }
           return;
         }
         MESSAGE_TAG_REGEX.lastIndex = 0;
@@ -465,14 +878,53 @@ class Renderer {
         }
         for (const part of parts) {
           const segment = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
-          segment.textContent = part;
           if (/^\{\{[^{}\n]+\}\}$/.test(part)) {
-            segment.setAttribute('class', 'message-tag');
-            segment.setAttribute('fill', '#b8bcc4');
+            const tag = parseMessageTag(part);
+            segment.textContent = isMessageTagHidden(tag) ? '' :
+              (renderMessageTagsAsStyling ? formatMessageTagPreview(tag) : part);
+            segment.setAttribute('class', `message-tag message-tag-${tag.name.replace(/[^A-Za-z0-9_-]/g, '-')}`);
+            const markerStyle = renderMessageTagsAsStyling
+              ? mutateMessageTextStyleForTag(tag, currentStyle)
+              : { fill: '#b8bcc4' };
+            applySvgTextStyle(segment, markerStyle);
+          } else {
+            segment.textContent = part;
+            if (renderMessageTagsAsStyling) {
+              applySvgTextStyle(segment, currentStyle);
+            }
           }
-          lineTspan.appendChild(segment);
+          if (segment.textContent) {
+            lineTspan.appendChild(segment);
+          }
         }
       });
+    });
+  }
+
+  _fitNodeBoxesToLabels() {
+    this.svgGroup.selectAll('.node').each(function() {
+      const shape = this.firstElementChild;
+      const label = this.querySelector('.label');
+      if (!shape || !label || shape.tagName.toLowerCase() !== 'rect') {
+        return;
+      }
+
+      let bbox;
+      try {
+        bbox = label.getBBox();
+      } catch (error) {
+        return;
+      }
+      if (!bbox || bbox.width <= 0 || bbox.height <= 0) {
+        return;
+      }
+
+      const padX = 10;
+      const padY = 8;
+      shape.setAttribute('x', `${Math.floor(bbox.x - padX)}`);
+      shape.setAttribute('y', `${Math.floor(bbox.y - padY)}`);
+      shape.setAttribute('width', `${Math.ceil(bbox.width + (padX * 2))}`);
+      shape.setAttribute('height', `${Math.ceil(bbox.height + (padY * 2))}`);
     });
   }
 
@@ -715,6 +1167,38 @@ class Renderer {
     this.updateTransform();
   }
 
+  viewportCenterPoint() {
+    const svgNode = this.svg.node();
+    if (!svgNode) {
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    }
+    const rect = svgNode.getBoundingClientRect();
+    return {
+      x: rect.left + (rect.width / 2),
+      y: rect.top + (rect.height / 2),
+    };
+  }
+
+  closestNodeIdToViewportCenter() {
+    const viewportCenter = this.viewportCenterPoint();
+    let closestId = null;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    this.svgGroup.selectAll('.node').each(function(id) {
+      const rect = this.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+      const dx = (rect.left + (rect.width / 2)) - viewportCenter.x;
+      const dy = (rect.top + (rect.height / 2)) - viewportCenter.y;
+      const distance = (dx * dx) + (dy * dy);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestId = id;
+      }
+    });
+    return closestId == null ? null : parseInt(closestId, 10);
+  }
+
   isElementVisible(id, margin=40) {
     const element = this.getElement(id);
     if (!element) {
@@ -782,11 +1266,13 @@ class Renderer {
       }
     }
 
-    const render = dagreD3.render();
+    const dagreRenderer = dagreD3.render();
     this.svgGroup.selectAll('*').interrupt();
     this.svgGroup.selectAll('*').remove();
-    this.svgGroup.call(render, visibleGraph);
+    this.svgGroup.call(dagreRenderer, visibleGraph);
+    this._restoreRawNodeLabels(visibleGraph);
     this._styleMessageTags();
+    this._fitNodeBoxesToLabels();
     this.svgGroup.selectAll('.node')
       .on('click', (id) => {
         if (isMultiSelectEvent(d3.event)) {
@@ -848,8 +1334,10 @@ class Graph {
 
     for (const entry of data) {
       if (entry.type === 'node') {
+        const rawLabel = getNodeLabel(entry);
         this.g.setNode(entry.id, {
-          label: getNodeLabel(entry),
+          label: getNodeLayoutLabel(rawLabel),
+          rawLabel,
           'class': entry.node_type,
           id: `n${entry.id}`,
           idx: entry.id,
@@ -959,12 +1447,24 @@ class Graph {
 
 graph = new Graph();
 
-function getSearchableNodeText(node) {
-  if (!node || !node.data) {
-    return '';
+function pushNodeParams(parts, node) {
+  if (!node || !node.data || !node.data.params) {
+    return;
   }
+  try {
+    parts.push(JSON.stringify(node.data.params));
+  } catch (err) {
+    // Ignore non-serializable values.
+  }
+}
 
-  const parts = [];
+function pushNodeIdentity(parts, node) {
+  if (!node || !node.data) {
+    return;
+  }
+  if (node.data.name) {
+    parts.push(node.data.name);
+  }
   if (node.data.actor) {
     parts.push(node.data.actor);
   }
@@ -974,12 +1474,11 @@ function getSearchableNodeText(node) {
   if (node.data.query) {
     parts.push(node.data.query);
   }
-  if (node.data.params) {
-    try {
-      parts.push(JSON.stringify(node.data.params));
-    } catch (err) {
-      // Ignore non-serializable values.
-    }
+}
+
+function pushMalsText(parts, node) {
+  if (!node || !node.data) {
+    return;
   }
   if (node.data._message_text) {
     parts.push(node.data._message_text);
@@ -989,14 +1488,57 @@ function getSearchableNodeText(node) {
       parts.push(value);
     }
   }
+}
+
+function getSearchableNodeText(node, scope='all') {
+  if (!node || !node.data) {
+    return '';
+  }
+
+  const parts = [];
+  if (scope === 'mals') {
+    pushMalsText(parts, node);
+    return parts.join('\n');
+  }
+  if (scope === 'params') {
+    pushNodeParams(parts, node);
+    return parts.join('\n');
+  }
+  if (scope === 'events') {
+    pushNodeIdentity(parts, node);
+    return parts.join('\n');
+  }
+  if (scope === 'switches') {
+    if (node.node_type !== 'switch') {
+      return '';
+    }
+    pushNodeIdentity(parts, node);
+    pushNodeParams(parts, node);
+    return parts.join('\n');
+  }
+  if (scope === 'subflows') {
+    if (node.node_type !== 'sub_flow') {
+      return '';
+    }
+    pushNodeIdentity(parts, node);
+    if (node.data.entry_point_name) {
+      parts.push(node.data.entry_point_name);
+    }
+    if (node.data.res_flowchart_name) {
+      parts.push(node.data.res_flowchart_name);
+    }
+    pushNodeParams(parts, node);
+    return parts.join('\n');
+  }
+
+  pushNodeIdentity(parts, node);
+  pushNodeParams(parts, node);
+  pushMalsText(parts, node);
   if (node.data.entry_point_name) {
     parts.push(node.data.entry_point_name);
   }
   if (node.data.res_flowchart_name) {
     parts.push(node.data.res_flowchart_name);
-  }
-  if (node.data.name) {
-    parts.push(node.data.name);
   }
   return parts.join('\n');
 }
@@ -1063,7 +1605,7 @@ function refreshGraphSearch(scrollToResult) {
   graphSearchMatches = graph.data
     .filter((entry) => entry.type === 'node')
     .filter((entry) => {
-      const haystack = getSearchableNodeText(entry);
+      const haystack = getSearchableNodeText(entry, graphSearchScope);
       if (!haystack) {
         return false;
       }
@@ -1094,10 +1636,27 @@ function refreshGraphSearch(scrollToResult) {
   }
 }
 
-window.eventEditorSetSearchQuery = function(query, caseInsensitive, scrollToResult) {
+window.eventEditorSetSearchQuery = function(query, caseInsensitive, scrollToResult, scope='all') {
   graphSearchQuery = (query || '').trim();
   graphSearchCaseInsensitive = !!caseInsensitive;
+  graphSearchScope = ['all', 'mals', 'params', 'events', 'switches', 'subflows'].includes(scope) ? scope : 'all';
   refreshGraphSearch(!!scrollToResult);
+};
+
+window.eventEditorSetRenderMessageTagsAsStyling = function(enabled) {
+  renderMessageTagsAsStyling = !!enabled;
+};
+
+window.eventEditorSetShowNonTextMessageTags = function(visible) {
+  showNonTextMessageTags = !!visible;
+};
+
+window.eventEditorSetIncludeMessageBlankLines = function(include) {
+  includeMessageBlankLines = !!include;
+};
+
+window.eventEditorSetShowMessageBubbleBreaks = function(show) {
+  showMessageBubbleBreaks = !!show;
 };
 
 window.eventEditorStepSearch = function(delta) {
@@ -1275,12 +1834,8 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
 
   widget.preserveViewportRequested.connect(() => {
     preservedViewport = graph.renderer.getViewport();
-    preservedFocusNodeId = graph.renderer.getSelection();
-    preservedFocusPoint = getElementCenterInViewport(
-      preservedFocusNodeId != null && preservedFocusNodeId !== -1
-        ? graph.renderer.getElement(preservedFocusNodeId)
-        : null
-    );
+    preservedFocusNodeId = graph.renderer.closestNodeIdToViewportCenter();
+    preservedFocusPoint = preservedFocusNodeId == null ? null : graph.renderer.viewportCenterPoint();
     suppressNextViewportAdjustment = true;
   });
 
