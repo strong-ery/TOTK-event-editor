@@ -22,6 +22,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Prepare build metadata
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $releaseVersion = "${{ github.ref_name }}"
+          } else {
+            $sha = "${{ github.sha }}"
+            $releaseVersion = "dev-" + $sha.Substring(0, 7)
+          }
+          $safeVersion = $releaseVersion -replace '[^A-Za-z0-9._-]', '-'
+          $artifactName = "TOTK-EventEditor_${safeVersion}-Windows"
+          $packageName = "$artifactName.zip"
+
+          Set-Content -Path "eventeditor/assets/release_version.txt" -Value $releaseVersion -NoNewline -Encoding UTF8
+          "RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ARTIFACT_NAME=$artifactName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PACKAGE_NAME=$packageName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -56,13 +74,13 @@ jobs:
 
       - name: Package executable
         shell: pwsh
-        run: Compress-Archive -Path "dist/TOTK EventEditor" -DestinationPath "EventEditor-Windows.zip"
+        run: Compress-Archive -Path "dist/TOTK EventEditor" -DestinationPath "$env:PACKAGE_NAME"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EventEditor-Windows
-          path: EventEditor-Windows.zip
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.PACKAGE_NAME }}
 
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
@@ -73,7 +91,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag "EventEditor-Windows.zip" --title $tag --generate-notes
+            gh release create $tag "$env:PACKAGE_NAME" --title $tag --generate-notes
           } else {
-            gh release upload $tag "EventEditor-Windows.zip" --clobber
+            gh release upload $tag "$env:PACKAGE_NAME" --clobber
           }

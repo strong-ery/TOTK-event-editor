@@ -9,6 +9,7 @@ from eventeditor.__main__ import (
     GITHUB_REPOSITORY_SLUG,
     GITHUB_REPOSITORY_URL,
     build_about_html,
+    normalize_display_version,
     normalize_flow_save_path,
 )
 import eventeditor.actor_xml as actor_xml
@@ -25,10 +26,18 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertEqual(GITHUB_REPOSITORY_SLUG, 'cargocult-mods/TOTK-event-editor')
         self.assertEqual(GITHUB_REPOSITORY_URL, 'https://github.com/cargocult-mods/TOTK-event-editor')
 
-        about_html = build_about_html('1.4.1', 'abcdef0')
+        about_html = build_about_html('v1.0.0')
         self.assertIn(APP_DISPLAY_NAME, about_html)
         self.assertIn(GITHUB_REPOSITORY_SLUG, about_html)
         self.assertIn(GITHUB_REPOSITORY_URL, about_html)
+        self.assertIn('Version: v1.0.0', about_html)
+        self.assertNotIn('Revision:', about_html)
+
+    def test_placeholder_versions_are_not_displayed(self):
+        self.assertEqual(normalize_display_version('0+unknown'), 'development build')
+        self.assertEqual(normalize_display_version('0+unknown.d20260607'), 'development build')
+        self.assertEqual(normalize_display_version(None), 'development build')
+        self.assertEqual(normalize_display_version('v1.0.0'), 'v1.0.0')
 
     def test_totk_suffix_helpers(self):
         self.assertEqual(

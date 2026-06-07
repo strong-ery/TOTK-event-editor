@@ -27,6 +27,7 @@ APP_INTERNAL_NAME = 'eventeditor'
 GITHUB_REPOSITORY_SLUG = 'cargocult-mods/TOTK-event-editor'
 GITHUB_REPOSITORY_URL = f'https://github.com/{GITHUB_REPOSITORY_SLUG}'
 UPSTREAM_REPOSITORY_URL = 'https://github.com/zeldamods/event-editor'
+RELEASE_VERSION_ASSET = 'assets/release_version.txt'
 
 DARK_THEME_STYLESHEET = '''
 QWidget {
@@ -372,15 +373,35 @@ def describe_flow_change_reason(reason: FlowDataChangeReason) -> str:
         return 'Edit actors'
     return 'Edit flow'
 
-def build_about_html(version: str, revision: str) -> str:
+def normalize_display_version(version: typing.Optional[str]) -> str:
+    if not version:
+        return 'development build'
+    version = str(version)
+    if version in ('0+unknown', 'unknown', 'None') or version.startswith('0+unknown'):
+        return 'development build'
+    return version
+
+def read_packaged_release_version() -> typing.Optional[str]:
+    try:
+        version = Path(util.get_path(RELEASE_VERSION_ASSET)).read_text(encoding='utf-8').strip()
+    except FileNotFoundError:
+        return None
+    return version or None
+
+def get_display_version() -> str:
+    packaged_version = read_packaged_release_version()
+    if packaged_version:
+        return packaged_version
+    return normalize_display_version(_version.get_versions().get('version'))
+
+def build_about_html(version: str) -> str:
     return (
         f'<h2>{APP_DISPLAY_NAME}</h2>'
         '<p>A maintained EventEditor fork developed around Tears of the Kingdom modding workflows.</p>'
         f'<p><b>GitHub:</b> <a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_SLUG}</a></p>'
         f'<p><b>Upstream:</b> <a href="{UPSTREAM_REPOSITORY_URL}">zeldamods/event-editor</a></p>'
         '<p><small>'
-        f'Version: {version}<br>'
-        f'Revision: {revision}'
+        f'Version: {version}'
         '</small></p>'
     )
 
@@ -474,9 +495,7 @@ class MainWindow(q.QMainWindow):
         self.initVersionInfo()
 
     def initVersionInfo(self) -> None:
-        versions = _version.get_versions()
-        self._version: str = versions['version']
-        self._version_rev: str = versions['full-revisionid']
+        self._version = get_display_version()
 
     def _applyWindowIcon(self) -> None:
         icon_path = util.get_icon_path()
@@ -703,7 +722,7 @@ class MainWindow(q.QMainWindow):
         help_menu.addAction(about_action)
 
     def about(self) -> None:
-        q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version, self._version_rev))
+        q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version))
 
     def initWidgets(self) -> None:
         self.tab_widget = q.QTabWidget(self)
