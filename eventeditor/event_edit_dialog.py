@@ -24,7 +24,7 @@ class ActorProxyModel(qc.QIdentityProxyModel):
 
 class ActorRelatedEventEditDialog(q.QDialog):
     def __init__(self, parent, flow_data: FlowData, idx: int, attr_list_name: str, attr_name: str) -> None:
-        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Edit event')
         self.setMinimumWidth(700)
         self.setMinimumHeight(500)
@@ -215,7 +215,7 @@ class ActorRelatedEventEditDialog(q.QDialog):
 
 class SubFlowEventEditDialog(q.QDialog):
     def __init__(self, parent, flow_data: FlowData, idx: int) -> None:
-        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Edit event')
         self.setMinimumWidth(500)
         self.flow_data = flow_data

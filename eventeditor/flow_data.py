@@ -40,13 +40,14 @@ class FlowData(qc.QObject):
 
         self._next_event_idx = 0
 
-    def setFlow(self, flow: typing.Optional[EventFlow]) -> None:
+    def setFlow(self, flow: typing.Optional[EventFlow], emit_file_loaded: bool = True) -> None:
         self.flow = flow
         self.actor_model.set(flow)
         self.entry_point_model.set(flow)
         self.event_model.set(flow)
         self.flowDataChanged.emit(FlowDataChangeReason.Reset)
-        self.fileLoaded.emit(flow)
+        if emit_file_loaded:
+            self.fileLoaded.emit(flow)
 
         self._next_event_idx = self.computeNextEventIdx()
 

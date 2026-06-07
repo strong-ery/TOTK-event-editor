@@ -186,20 +186,27 @@ class ContainerView(q.QWidget):
         self.paste_btn = q.QPushButton('Paste JSON')
         self.paste_btn.setStyleSheet('padding: 2px 5px;')
         self.paste_btn.clicked.connect(self.pasteJsonRequested)
-        box = q.QHBoxLayout()
+        self.header_box = q.QHBoxLayout()
         label = q.QLabel('Parameters')
         label.setStyleSheet('font-weight: bold;')
-        box.addWidget(label, stretch=1)
+        self.header_box.addWidget(label, stretch=1)
         if has_autofill_btn:
-            box.addWidget(self.copy_btn)
-            box.addWidget(self.paste_btn)
-            box.addWidget(self.reorder_btn)
-            box.addWidget(self.autofill_btn)
-        box.addWidget(self.add_btn)
+            self.header_box.addWidget(self.copy_btn)
+            self.header_box.addWidget(self.paste_btn)
+            self.header_box.addWidget(self.reorder_btn)
+            self.header_box.addWidget(self.autofill_btn)
+        self.header_box.addWidget(self.add_btn)
 
         layout = q.QVBoxLayout(self)
-        layout.addLayout(box)
+        layout.addLayout(self.header_box)
         layout.addWidget(self.tview, stretch=1)
+
+    def addHeaderButton(self, text: str, callback) -> q.QPushButton:
+        button = q.QPushButton(text)
+        button.setStyleSheet('padding: 2px 5px;')
+        button.clicked.connect(callback)
+        self.header_box.insertWidget(max(self.header_box.count() - 1, 1), button)
+        return button
 
     def onAdd(self) -> None:
         dialog = ContainerAddItemDialog(self, self.model)
@@ -221,7 +228,7 @@ class ContainerView(q.QWidget):
         idx = smodel.selectedIndexes()[0]
         menu = q.QMenu()
         menu.addAction('Convert to &argument', lambda: self.onConvertToArgument(idx))
-        menu.addAction('&Remove item', lambda: self.onRemove(idx))
+        menu.addAction('&Delete item', lambda: self.onRemove(idx))
         for builder in self.action_builders:
             builder(menu, idx)
         menu.exec_(self.sender().viewport().mapToGlobal(pos))

@@ -15,7 +15,7 @@ import PyQt5.QtWidgets as q # type: ignore
 
 class EventTypeChooserDialog(q.QDialog):
     def __init__(self, parent) -> None:
-        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Choose an event type')
 
         self.rbtn_group = q.QButtonGroup()
@@ -51,20 +51,54 @@ _PLACEHOLDER_ACTOR.identifier.name = '<placeholder actor>'
 _PLACEHOLDER_ACTOR.actions.append(StringHolder('<placeholder action>'))
 _PLACEHOLDER_ACTOR.queries.append(StringHolder('<placeholder query>'))
 
+def _ensure_placeholder_actor(flow_data: FlowData) -> Actor:
+    assert flow_data.flow and flow_data.flow.flowchart
+    flowchart = flow_data.flow.flowchart
+    placeholder_name = _PLACEHOLDER_ACTOR.identifier.name
+    placeholder_sub_name = _PLACEHOLDER_ACTOR.identifier.sub_name
+    placeholder_action = _PLACEHOLDER_ACTOR.actions[0].v
+    placeholder_query = _PLACEHOLDER_ACTOR.queries[0].v
+
+    actor = next(
+        (
+            existing for existing in flowchart.actors
+            if existing.identifier.name == placeholder_name and existing.identifier.sub_name == placeholder_sub_name
+        ),
+        None,
+    )
+    if actor is None:
+        actor = Actor()
+        actor.identifier.name = placeholder_name
+        actor.identifier.sub_name = placeholder_sub_name
+        actor.actions.append(StringHolder(placeholder_action))
+        actor.queries.append(StringHolder(placeholder_query))
+        if not flow_data.actor_model.appendActor(actor):
+            flowchart.actors.append(actor)
+    else:
+        if not any(action.v == placeholder_action for action in actor.actions):
+            actor.actions.append(StringHolder(placeholder_action))
+        if not any(query.v == placeholder_query for query in actor.queries):
+            actor.queries.append(StringHolder(placeholder_query))
+    return actor
+
 def add_new_event(parent, flow_data: FlowData) -> typing.Optional[Event]:
+    if not flow_data.flow or not flow_data.flow.flowchart:
+        return None
     etype = show_event_type_chooser(parent)
     if etype is None:
         return None
     new_event = Event()
     new_event.name = flow_data.generateEventName()
     if etype == EventType.kAction:
+        placeholder_actor = _ensure_placeholder_actor(flow_data)
         new_event.data = ActionEvent()
-        new_event.data.actor.v = _PLACEHOLDER_ACTOR
-        new_event.data.actor_action.v = _PLACEHOLDER_ACTOR.actions[0]
+        new_event.data.actor.v = placeholder_actor
+        new_event.data.actor_action.v = placeholder_actor.actions[0]
     elif etype == EventType.kSwitch:
+        placeholder_actor = _ensure_placeholder_actor(flow_data)
         new_event.data = SwitchEvent()
-        new_event.data.actor.v = _PLACEHOLDER_ACTOR
-        new_event.data.actor_query.v = _PLACEHOLDER_ACTOR.queries[0]
+        new_event.data.actor.v = placeholder_actor
+        new_event.data.actor_query.v = placeholder_actor.queries[0]
     elif etype == EventType.kSubFlow:
         new_event.data = SubFlowEvent()
         new_event.data.entry_point_name = 'placeholder sub flow'
@@ -79,7 +113,7 @@ def add_new_event(parent, flow_data: FlowData) -> typing.Optional[Event]:
 
 class EventChooserDialog(q.QDialog):
     def __init__(self, parent, flow_data: FlowData, enable_ctx_menu: bool=True) -> None:
-        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Choose an event')
         self.setMinimumWidth(700)
         self.setMinimumHeight(250)

@@ -18,11 +18,11 @@ _PLACEHOLDER_EVENT.name = '<placeholder>'
 class EventBranchEditorTableView(q.QTableView):
     chooserEventDoubleClicked = qc.pyqtSignal(int)
     chooserSelectSignal = qc.pyqtSignal(int)
-    actionProhibitionChanged = qc.pyqtSignal(bool)
 
     def __init__(self, parent, flow_data: FlowData) -> None:
         super().__init__(parent)
         self.flow_data = flow_data
+        self._chooser_dialogs: typing.List[q.QDialog] = []
 
     def edit(self, index: qc.QModelIndex, trigger, event) -> bool:
         if not (self.editTriggers() & trigger) or not index.isValid() or not (index.flags() & (qc.Qt.ItemIsEditable | qc.Qt.ItemIsUserCheckable)):
@@ -30,20 +30,31 @@ class EventBranchEditorTableView(q.QTableView):
 
         data = index.data(qc.Qt.EditRole)
         if isinstance(data, Event):
-            self.actionProhibitionChanged.emit(True)
             dialog = EventChooserDialog(self, self.flow_data, enable_ctx_menu=False)
-            dialog.show()
+            self._chooser_dialogs.append(dialog)
             self.chooserSelectSignal.connect(dialog.event_view.selectEvent)
             try:
                 dialog.event_view.selectEvent(self.flow_data.flow.flowchart.events.index(data))
             except ValueError:
                 pass
             dialog.event_view.jumpToFlowchartRequested.connect(self.chooserEventDoubleClicked)
-            dialog.finished.connect(lambda: self.actionProhibitionChanged.emit(False))
             def onChooserAccept():
                 selected_event = dialog.getSelectedEvent()
                 self.model().setData(index, selected_event, qc.Qt.EditRole)
+            def cleanup(*args) -> None:
+                try:
+                    self.chooserSelectSignal.disconnect(dialog.event_view.selectEvent)
+                except TypeError:
+                    pass
+                try:
+                    self._chooser_dialogs.remove(dialog)
+                except ValueError:
+                    pass
             dialog.accepted.connect(onChooserAccept)
+            dialog.finished.connect(cleanup)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
             return False
 
         return super().edit(index, trigger, event)
@@ -162,7 +173,7 @@ class SwitchEventEditDialog(q.QDialog):
     chooserSelectSignal = qc.pyqtSignal(int)
 
     def __init__(self, parent, cases: _Cases, flow_data: FlowData) -> None:
-        super().__init__(parent)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Edit switch event')
         self.setMinimumWidth(600)
         self.flow_data = flow_data
@@ -196,12 +207,6 @@ class SwitchEventEditDialog(q.QDialog):
         layout.addLayout(add_btn_box)
         layout.addWidget(btn_box)
 
-        self.tview.actionProhibitionChanged.connect(lambda v: self.setEnabled(not v))
-
-    def closeEvent(self, event):
-        if not self.isEnabled():
-            event.ignore()
-
     def accept(self) -> None:
         if not self.model.isValid():
             q.QMessageBox.critical(self, 'Invalid data', 'Please ensure there are no placeholder or duplicate cases left.')
@@ -223,7 +228,7 @@ class SwitchEventEditDialog(q.QDialog):
             return
         sidx = smodel.selectedRows()[0]
         menu = q.QMenu()
-        menu.addAction('Remove', lambda: self.model.removeCase(sidx.row()))
+        menu.addAction('Delete', lambda: self.model.removeCase(sidx.row()))
         menu.exec_(self.sender().viewport().mapToGlobal(pos))
 
 class ForkEventModel(qc.QAbstractListModel):
@@ -308,7 +313,7 @@ class ForkEventEditDialog(q.QDialog):
     chooserSelectSignal = qc.pyqtSignal(int)
 
     def __init__(self, parent, forks: _Forks, flow_data: FlowData) -> None:
-        super().__init__(parent)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Edit fork event')
         self.setMinimumWidth(600)
         self.flow_data = flow_data
@@ -341,12 +346,6 @@ class ForkEventEditDialog(q.QDialog):
         layout.addLayout(add_btn_box)
         layout.addWidget(btn_box)
 
-        self.tview.actionProhibitionChanged.connect(lambda v: self.setEnabled(not v))
-
-    def closeEvent(self, event):
-        if not self.isEnabled():
-            event.ignore()
-
     def accept(self) -> None:
         if not self.model.isValid():
             q.QMessageBox.critical(self, 'Invalid data', 'Please ensure there are no placeholder or duplicate forks left.')
@@ -369,5 +368,5 @@ class ForkEventEditDialog(q.QDialog):
             return
         sidx = smodel.selectedRows()[0]
         menu = q.QMenu()
-        menu.addAction('Remove', lambda: self.model.removeCase(sidx.row()))
+        menu.addAction('Delete', lambda: self.model.removeCase(sidx.row()))
         menu.exec_(self.sender().viewport().mapToGlobal(pos))

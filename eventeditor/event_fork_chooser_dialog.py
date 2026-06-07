@@ -13,13 +13,14 @@ class EventForkChooserDialog(q.QDialog):
     chooserSelectSignal = qc.pyqtSignal(int)
 
     def __init__(self, parent, flow_data: FlowData) -> None:
-        super().__init__(parent)
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Create fork event')
         self.setMinimumWidth(500)
         self.flow_data = flow_data
 
         self.start_event: typing.Optional[Event] = None
         self.end_event: typing.Optional[Event] = None
+        self._chooser_dialogs: typing.List[q.QDialog] = []
 
         self.form = q.QFormLayout()
         self.start_event_btn = q.QPushButton('<select an event>')
@@ -28,6 +29,18 @@ class EventForkChooserDialog(q.QDialog):
         self.form.addRow('Add &join after\n(action or subflow event):', self.end_event_btn)
         self.connectEventButtons()
         self.initLayout()
+
+    def setStartEvent(self, event: typing.Optional[Event]) -> None:
+        self.start_event = event
+        self.start_event_btn.setText(
+            util.get_event_full_description(event) if event else '<select an event>'
+        )
+
+    def setEndEvent(self, event: typing.Optional[Event]) -> None:
+        self.end_event = event
+        self.end_event_btn.setText(
+            util.get_event_full_description(event) if event else '<select an event>'
+        )
 
     def initLayout(self) -> None:
         warning_msg = q.QLabel('<br><b>Warning</b>: no validation will be performed.')
@@ -46,9 +59,8 @@ class EventForkChooserDialog(q.QDialog):
         self.end_event_btn.clicked.connect(lambda: self.onEditEventClicked('end_event'))
 
     def onEditEventClicked(self, event_attr_name: str) -> None:
-        self.setEnabled(False)
         dialog = EventChooserDialog(self, self.flow_data, enable_ctx_menu=False)
-        dialog.show()
+        self._chooser_dialogs.append(dialog)
         self.chooserSelectSignal.connect(dialog.event_view.selectEvent)
         try:
             dialog.event_view.selectEvent(
@@ -56,16 +68,24 @@ class EventForkChooserDialog(q.QDialog):
         except ValueError:
             pass
         dialog.event_view.jumpToFlowchartRequested.connect(self.chooserEventDoubleClicked)
-        dialog.finished.connect(lambda: self.setEnabled(True))
         def onChooserAccept():
             selected_event = dialog.getSelectedEvent()
             setattr(self, event_attr_name, selected_event)
             getattr(self, event_attr_name + '_btn').setText(util.get_event_full_description(selected_event))
         dialog.accepted.connect(onChooserAccept)
-
-    def closeEvent(self, event):
-        if not self.isEnabled():
-            event.ignore()
+        def cleanup(*args) -> None:
+            try:
+                self.chooserSelectSignal.disconnect(dialog.event_view.selectEvent)
+            except TypeError:
+                pass
+            try:
+                self._chooser_dialogs.remove(dialog)
+            except ValueError:
+                pass
+        dialog.finished.connect(cleanup)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def accept(self) -> None:
         if not self.start_event or not self.end_event:

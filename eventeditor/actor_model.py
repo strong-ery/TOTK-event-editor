@@ -41,6 +41,15 @@ class ActorModel(qc.QAbstractTableModel):
         self.endInsertRows()
         return True
 
+    def appendActor(self, actor: Actor) -> bool:
+        if not self.flow or not self.flow.flowchart:
+            return False
+        row = len(self.l)
+        self.beginInsertRows(qc.QModelIndex(), row, row)
+        self.l.append(actor)
+        self.endInsertRows()
+        return True
+
     def remove(self, actor: Actor) -> bool:
         if not self.flow or not self.flow.flowchart:
             return False
