@@ -2,6 +2,7 @@ import argparse
 import io
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 import traceback
@@ -12,6 +13,7 @@ from evfl import EventFlow
 from evfl.event import SubFlowEvent
 import eventeditor.ai as ai
 import eventeditor.actor_json as aj
+import eventeditor.mals as mals
 import eventeditor.totk_zs as totk_zs
 from eventeditor.actor_view import ActorView
 from eventeditor.event_view import EventView
@@ -279,13 +281,27 @@ MALS_MODE_VANILLA = 'vanilla'
 MALS_MODE_INFERRED = 'inferred'
 MALS_MODE_MANUAL = 'manual'
 MALS_MODES = (MALS_MODE_VANILLA, MALS_MODE_INFERRED, MALS_MODE_MANUAL)
-MALS_ARCHIVE_PATTERNS = (
-    'USen.Product*.sarc.zs',
-    'USen*.sarc.zs',
-    '*.sarc.zs',
-    '*.sarc',
-    '*.msbt',
+DEFAULT_MALS_LOCALE = 'USen'
+KNOWN_TOTK_MALS_LOCALES = (
+    'CNzh',
+    'EUde',
+    'EUen',
+    'EUes',
+    'EUfr',
+    'EUit',
+    'EUnl',
+    'EUru',
+    'JPja',
+    'KRko',
+    'TWzh',
+    'USen',
+    'USes',
+    'USfr',
 )
+MALS_ARCHIVE_SUFFIXES = ('.sarc.zs', '.sarc', '.msbt')
+MALS_ARCHIVE_SUFFIXES_LONGEST_FIRST = tuple(sorted(MALS_ARCHIVE_SUFFIXES, key=len, reverse=True))
+MALS_PRODUCT_SUFFIX_RE = re.compile(r'\.Product(?:\.[^.]+)*$', re.IGNORECASE)
+MALS_LOCALE_NAME_RE = re.compile(r'^[A-Z]{2}[a-z]{2}$')
 _STYLESHEET_ICON_CACHE: typing.Dict[typing.Tuple[str, str, str], str] = {}
 
 def split_flow_path_suffix(path: str) -> typing.Tuple[str, str]:
@@ -454,27 +470,122 @@ def infer_eventflow_mals_dir(flow_path: str) -> typing.Optional[Path]:
         return owner_root / 'romfs' / 'Mals'
     return owner_root / 'Mals'
 
-def choose_mals_archive_from_directory(mals_dir: typing.Optional[Path]) -> str:
+def strip_mals_archive_suffix(path: str) -> str:
+    stripped_path = Path(path).name
+    lowered = stripped_path.lower()
+    for suffix in MALS_ARCHIVE_SUFFIXES_LONGEST_FIRST:
+        if lowered.endswith(suffix):
+            return stripped_path[:-len(suffix)]
+    return stripped_path
+
+def mals_locale_name_for_path(path: typing.Union[str, Path]) -> str:
+    base_name = strip_mals_archive_suffix(str(path))
+    base_name = MALS_PRODUCT_SUFFIX_RE.sub('', base_name)
+    return base_name
+
+def is_mals_locale_name(value: typing.Any) -> bool:
+    return isinstance(value, str) and bool(MALS_LOCALE_NAME_RE.match(value))
+
+def discover_mals_locale_names(mals_dir: typing.Optional[Path]) -> typing.List[str]:
+    if not mals_dir or not mals_dir.is_dir():
+        return []
+
+    locales: typing.Set[str] = set()
+    for path in mals_dir.iterdir():
+        if not path.is_file():
+            continue
+        lowered = path.name.lower()
+        if not any(lowered.endswith(suffix) for suffix in MALS_ARCHIVE_SUFFIXES):
+            continue
+        locale = mals_locale_name_for_path(path)
+        if is_mals_locale_name(locale):
+            locales.add(locale)
+    return sorted(locales)
+
+def _iter_mals_archives(mals_dir: Path) -> typing.Iterable[Path]:
+    for path in mals_dir.iterdir():
+        if not path.is_file():
+            continue
+        lowered = path.name.lower()
+        if any(lowered.endswith(suffix) for suffix in MALS_ARCHIVE_SUFFIXES):
+            yield path
+
+def _mals_archive_sort_key(path: Path) -> typing.Tuple[int, int, str]:
+    lowered = path.name.lower()
+    suffix_priority = next(
+        (index for index, suffix in enumerate(MALS_ARCHIVE_SUFFIXES_LONGEST_FIRST) if lowered.endswith(suffix)),
+        len(MALS_ARCHIVE_SUFFIXES_LONGEST_FIRST),
+    )
+    product_priority = 0 if MALS_PRODUCT_SUFFIX_RE.search(strip_mals_archive_suffix(path.name)) else 1
+    return suffix_priority, product_priority, lowered
+
+def normalize_mals_locale(locale: str) -> str:
+    return locale if is_mals_locale_name(locale) else DEFAULT_MALS_LOCALE
+
+def choose_mals_archive_from_directory(mals_dir: typing.Optional[Path], locale: str = DEFAULT_MALS_LOCALE) -> str:
     if not mals_dir or not mals_dir.is_dir():
         return ''
 
-    for pattern in MALS_ARCHIVE_PATTERNS:
-        matches = sorted(
-            (path for path in mals_dir.glob(pattern) if path.is_file()),
-            key=lambda path: path.name.lower(),
-        )
-        if matches:
-            return str(matches[0])
-    return ''
+    target_locale = normalize_mals_locale(locale)
+    matches = [
+        path
+        for path in _iter_mals_archives(mals_dir)
+        if mals_locale_name_for_path(path) == target_locale
+    ]
+    return str(sorted(matches, key=_mals_archive_sort_key)[0]) if matches else ''
 
-def infer_mals_archive_for_flow_path(flow_path: str) -> str:
-    return choose_mals_archive_from_directory(infer_eventflow_mals_dir(flow_path))
+def infer_mals_archive_for_flow_path(flow_path: str, locale: str = DEFAULT_MALS_LOCALE) -> str:
+    return choose_mals_archive_from_directory(infer_eventflow_mals_dir(flow_path), locale)
 
-def vanilla_mals_archive_path() -> str:
+def vanilla_mals_archive_path(locale: str = DEFAULT_MALS_LOCALE) -> str:
     romfs_path = totk_zs.get_romfs_path()
     if not romfs_path:
         return ''
-    return choose_mals_archive_from_directory(Path(romfs_path) / 'Mals')
+    return choose_mals_archive_from_directory(Path(romfs_path) / 'Mals', locale)
+
+def manual_mals_archive_path(manual_path: str, locale: str = DEFAULT_MALS_LOCALE) -> str:
+    if not manual_path:
+        return ''
+
+    path = Path(manual_path)
+    if path.is_dir():
+        return choose_mals_archive_from_directory(path, locale)
+
+    lowered = path.name.lower()
+    if not any(lowered.endswith(suffix) for suffix in MALS_ARCHIVE_SUFFIXES):
+        return ''
+    if lowered.endswith('.msbt'):
+        return str(path) if path.is_file() else ''
+    if mals_locale_name_for_path(path) == normalize_mals_locale(locale):
+        return str(path) if path.is_file() else ''
+    return choose_mals_archive_from_directory(path.parent, locale)
+
+def available_mals_locale_names(flow_path: str = '', manual_path: str = '') -> typing.List[str]:
+    locales: typing.List[str] = []
+
+    def add_many(values: typing.Iterable[str]) -> None:
+        for value in values:
+            if is_mals_locale_name(value) and value not in locales:
+                locales.append(value)
+
+    romfs_path = totk_zs.get_romfs_path()
+    if romfs_path:
+        add_many(discover_mals_locale_names(Path(romfs_path) / 'Mals'))
+
+    add_many(discover_mals_locale_names(infer_eventflow_mals_dir(flow_path)))
+
+    if manual_path:
+        manual = Path(manual_path)
+        if manual.is_dir():
+            add_many(discover_mals_locale_names(manual))
+        else:
+            locale = mals_locale_name_for_path(manual)
+            if is_mals_locale_name(locale):
+                add_many([locale])
+            add_many(discover_mals_locale_names(manual.parent))
+
+    add_many(KNOWN_TOTK_MALS_LOCALES)
+    return sorted(locales)
 
 def is_path_relative_to(path: Path, root: Path) -> bool:
     try:
@@ -704,6 +815,7 @@ class MainWindow(q.QMainWindow):
         self._history_suspended = False
         self._history_snapshot = b''
         self._mals_mode = MALS_MODE_INFERRED
+        self._mals_locale = DEFAULT_MALS_LOCALE
         self._manual_mals_path = ''
         self._include_mals_text_tags = True
         self._render_mals_tags_as_styling = True
@@ -963,6 +1075,9 @@ class MainWindow(q.QMainWindow):
         self.open_current_mals_action.triggered.connect(self.onOpenCurrentMals)
         self.current_mals_menu.addAction(self.open_current_mals_action)
         self.mals_menu.addMenu(self.current_mals_menu)
+        self.mals_locale_menu = q.QMenu(f'Locale: {DEFAULT_MALS_LOCALE}', self)
+        self._mals_locale_actions: typing.Dict[str, q.QAction] = {}
+        self.mals_menu.addMenu(self.mals_locale_menu)
         self.mals_menu.addSeparator()
 
         self.vanilla_mals_action = q.QAction('Vanilla', self)
@@ -1188,6 +1303,7 @@ class MainWindow(q.QMainWindow):
         settings.beginGroup('mals')
         mode = settings.value('mode', '')
         manual_path = settings.value('manual_path', '')
+        self._mals_locale = normalize_mals_locale(settings.value('locale', DEFAULT_MALS_LOCALE))
         self._render_mals_tags_as_styling = settings.value('render_tags_as_styling', True, type=bool)
         if settings.contains('hide_non_formatting_tags'):
             self._hide_non_formatting_mals_tags = settings.value('hide_non_formatting_tags', False, type=bool)
@@ -1251,6 +1367,7 @@ class MainWindow(q.QMainWindow):
 
         settings.beginGroup('mals')
         settings.setValue('mode', self._mals_mode)
+        settings.setValue('locale', self._mals_locale)
         settings.setValue('manual_path', self._manual_mals_path)
         settings.setValue('render_tags_as_styling', self._render_mals_tags_as_styling)
         settings.setValue('hide_non_formatting_tags', self._hide_non_formatting_mals_tags)
@@ -1296,6 +1413,7 @@ class MainWindow(q.QMainWindow):
             self._manual_mals_path,
         )
         self.current_mals_menu.setTitle(f'Current: {display_name}')
+        self.updateMalsLocaleActions()
 
         for action, mode, label in (
             (self.vanilla_mals_action, MALS_MODE_VANILLA, 'Vanilla'),
@@ -1315,10 +1433,29 @@ class MainWindow(q.QMainWindow):
         self.open_mals_folder_action.setToolTip(current_folder or tooltip)
         self.show_missing_mals_report_action.setEnabled(bool(self.flow))
 
+    def updateMalsLocaleActions(self) -> None:
+        self.mals_locale_menu.setTitle(f'Locale: {self._mals_locale}')
+        locales = available_mals_locale_names(self.flow_path, self._manual_mals_path)
+        if self._mals_locale not in locales:
+            locales.append(self._mals_locale)
+            locales.sort()
+
+        if list(self._mals_locale_actions.keys()) != locales:
+            self.mals_locale_menu.clear()
+            self._mals_locale_actions = {}
+            for locale in locales:
+                action = q.QAction('', self)
+                action.triggered.connect(lambda checked=False, locale=locale: self.setMalsLocale(locale))
+                self.mals_locale_menu.addAction(action)
+                self._mals_locale_actions[locale] = action
+
+        for locale, action in self._mals_locale_actions.items():
+            action.setText(f'{"•" if self._mals_locale == locale else " "} {locale}')
+
     def setMalsPath(self, path: str, force_reload: bool = True, report_errors: bool = True,
                     mode: typing.Optional[str] = None) -> bool:
         if not path:
-            self.flowchart_view.clearMessageArchivePath()
+            self.flowchart_view.clearMessageArchivePath(mals.mals_file_not_found_text(self._mals_locale))
             if mode in MALS_MODES:
                 self._mals_mode = mode
             self.updateMalsPathActions()
@@ -1344,6 +1481,10 @@ class MainWindow(q.QMainWindow):
         if mode in MALS_MODES:
             self._mals_mode = mode
         if self._mals_mode == MALS_MODE_MANUAL:
+            detected_locale = mals_locale_name_for_path(path)
+            if is_mals_locale_name(detected_locale):
+                self._mals_locale = detected_locale
+        if self._mals_mode == MALS_MODE_MANUAL:
             self._manual_mals_path = path
         self.updateMalsPathActions()
         return True
@@ -1361,23 +1502,34 @@ class MainWindow(q.QMainWindow):
         self.applyMalsSelection(force_reload=False, report_errors=False)
         return False
 
+    def setMalsLocale(self, locale: str, force_reload: bool = True, report_errors: bool = True) -> bool:
+        locale = normalize_mals_locale(locale)
+        if locale == self._mals_locale:
+            self.updateMalsPathActions()
+            return True
+
+        self._mals_locale = locale
+        self.applyMalsSelection(force_reload=force_reload, report_errors=report_errors)
+        self.updateMalsPathActions()
+        return True
+
     def applyMalsSelection(self, force_reload: bool = True, report_errors: bool = True) -> bool:
         if self._mals_mode == MALS_MODE_MANUAL:
-            path = self._manual_mals_path
+            path = manual_mals_archive_path(self._manual_mals_path, self._mals_locale)
         elif self._mals_mode == MALS_MODE_VANILLA:
-            path = vanilla_mals_archive_path()
+            path = vanilla_mals_archive_path(self._mals_locale)
         else:
-            path = infer_mals_archive_for_flow_path(self.flow_path)
+            path = infer_mals_archive_for_flow_path(self.flow_path, self._mals_locale)
 
         if not path:
-            self.flowchart_view.clearMessageArchivePath()
+            self.flowchart_view.clearMessageArchivePath(mals.mals_file_not_found_text(self._mals_locale))
             self.updateMalsPathActions()
             if report_errors and self._mals_mode != MALS_MODE_MANUAL:
                 source = 'vanilla RomFS' if self._mals_mode == MALS_MODE_VANILLA else 'current EventFlow path'
                 q.QMessageBox.warning(
                     self,
                     'Mals path',
-                    f'No Mals archive could be found from the {source}.',
+                    f'No {self._mals_locale} Mals archive could be found from the {source}.',
                 )
             return True
 

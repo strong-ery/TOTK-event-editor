@@ -1,6 +1,7 @@
 from enum import IntEnum, auto
 import typing
 
+from eventeditor.container_model import format_container_display_value
 from eventeditor.util import *
 from evfl import EventFlow, Event
 import PyQt5.QtCore as qc # type: ignore
@@ -79,8 +80,12 @@ class EventModel(qc.QAbstractTableModel):
             return get_event_next_summary(self.l[row])
         if col == EventModelColumn.Parameters:
             params = get_event_param_list(self.l[row])
+            display_params = {
+                key: format_container_display_value(key, value)
+                for key, value in params.items()
+            }
             if role == qc.Qt.DisplayRole:
-                return '; '.join([f'{k}={v}' for k, v in params.items()])
+                return '; '.join([f'{k}={v}' for k, v in display_params.items()])
             if role == qc.Qt.ToolTipRole:
-                return '<br>'.join([f'<b>{k}</b>: {v}' for k, v in params.items()])
+                return '<br>'.join([f'<b>{k}</b>: {v}' for k, v in display_params.items()])
         return qc.QVariant()

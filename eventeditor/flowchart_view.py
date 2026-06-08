@@ -2,6 +2,7 @@ import base64
 import copy
 import json
 import pickle
+from pathlib import Path
 import traceback
 import typing
 
@@ -250,7 +251,8 @@ class FlowchartView(q.QWidget):
         self._entry_point_reachable_cache_key: typing.Optional[typing.Tuple[int, int, int]] = None
         self._entry_point_reachable_cache: typing.List[typing.Set[Event]] = []
         self._message_archive_path = ''
-        self._message_lookup_key: typing.Tuple[str, typing.FrozenSet[str], bool] = ('', frozenset(), True)
+        self._message_archive_missing_text = ''
+        self._message_lookup_key: typing.Tuple[str, typing.FrozenSet[str], bool, str] = ('', frozenset(), True, '')
         self._message_lookup: typing.Dict[str, str] = {}
         self.initWidgets()
         self.initLayout()
@@ -535,25 +537,34 @@ class FlowchartView(q.QWidget):
 
     def setMessageArchivePath(self, path: str, force_reload: bool = True, report_errors: bool = True) -> None:
         self._message_archive_path = path or ''
+        self._message_archive_missing_text = ''
         self.updateMessageLookup(force=True, report_errors=report_errors)
         if force_reload:
             self.refreshGraphPresentation()
 
-    def clearMessageArchivePath(self) -> None:
+    def clearMessageArchivePath(self, missing_text: str = '') -> None:
         self._message_archive_path = ''
-        self._message_lookup_key = ('', frozenset(), self.showMessageTags)
-        self._message_lookup = {}
+        self._message_archive_missing_text = missing_text or ''
+        self._message_lookup_key = ('', frozenset(), self.showMessageTags, self._message_archive_missing_text)
+        message_ids = frozenset(self._collectMessageIds())
+        self._message_lookup = {
+            message_id: self._message_archive_missing_text
+            for message_id in message_ids
+        } if self._message_archive_missing_text else {}
         self.refreshGraphPresentation()
 
     def updateMessageLookup(self, force: bool = False, report_errors: bool = False) -> bool:
         message_ids = frozenset(self._collectMessageIds())
-        cache_key = (self._message_archive_path, message_ids, self.showMessageTags)
+        cache_key = (self._message_archive_path, message_ids, self.showMessageTags, self._message_archive_missing_text)
         if not force and cache_key == self._message_lookup_key:
             return False
 
         self._message_lookup_key = cache_key
         if not self._message_archive_path or not message_ids:
-            self._message_lookup = {}
+            self._message_lookup = {
+                message_id: self._message_archive_missing_text
+                for message_id in message_ids
+            } if self._message_archive_missing_text and message_ids else {}
             return True
 
         try:
@@ -565,7 +576,10 @@ class FlowchartView(q.QWidget):
             )
             return True
         except Exception:
-            self._message_lookup = {}
+            self._message_lookup = {
+                message_id: self._message_archive_missing_text
+                for message_id in message_ids
+            } if self._message_archive_missing_text and not Path(self._message_archive_path).is_file() else {}
             if report_errors:
                 raise
             return True
@@ -607,7 +621,7 @@ class FlowchartView(q.QWidget):
             return '\n'.join(lines)
 
         if not current_path:
-            lines.append('No current Mals archive is selected.')
+            lines.append(self._message_archive_missing_text or 'No current Mals archive is selected.')
             lines.append('')
             lines.append('Referenced MSBTs:')
             for prefix in sorted(mals._group_message_ids_by_prefix(message_ids).keys()):
@@ -1098,7 +1112,7 @@ class FlowchartView(q.QWidget):
         if reason & (FlowDataChangeReason.Reset | FlowDataChangeReason.Events | FlowDataChangeReason.EventFlowRename):
             self._invalidateEntryPointReachabilityCache()
         message_lookup_changed = False
-        if self._message_archive_path and reason & (
+        if (self._message_archive_path or self._message_archive_missing_text) and reason & (
             FlowDataChangeReason.Reset |
             FlowDataChangeReason.Events |
             FlowDataChangeReason.EventParameters

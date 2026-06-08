@@ -14,6 +14,11 @@ MSBT_NOT_FOUND_TEXT = '<MSBT not found in Mals>'
 MESSAGE_ID_NOT_FOUND_TEXT = '<MessageID not found in provided MSBT>'
 
 
+def mals_file_not_found_text(locale: str) -> str:
+    locale = (locale or '').strip() or 'Selected'
+    return f'<{locale} Mals file not found>'
+
+
 _TOTK_TAG_NAMES: typing.Dict[typing.Tuple[int, int], str] = {
     (0, 0): 'ruby',
     (0, 1): 'font',

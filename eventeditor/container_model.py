@@ -6,6 +6,27 @@ from evfl import ActorIdentifier, Argument, Container
 import PyQt5.QtCore as qc # type: ignore
 import PyQt5.QtWidgets as q # type: ignore
 
+def is_choice_label_key(key: typing.Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    return lowered.startswith('choicelabel') and lowered[len('choicelabel'):].isdigit()
+
+def format_container_display_value(key: typing.Any, value: typing.Any) -> typing.Any:
+    if is_choice_label_key(key):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return f'{value:04d}'
+        if isinstance(value, str) and value.strip().isdigit():
+            return value.strip().zfill(4)
+
+    if isinstance(value, ActorIdentifier):
+        return str(value)
+    if isinstance(value, Argument):
+        return str(value)
+    if isinstance(value, list):
+        return ', '.join(str(i) for i in value)
+    return value
+
 class ContainerModelColumn(IntEnum):
     DataType = 0
     Key = auto()
@@ -115,19 +136,23 @@ class ContainerModel(qc.QAbstractTableModel):
             if col != ContainerModelColumn.Value or not isinstance(item, bool):
                 return qc.QVariant()
             return qc.Qt.Checked if item else qc.Qt.Unchecked
-        if role == qc.Qt.EditRole or role == qc.Qt.DisplayRole or role == qc.Qt.ToolTipRole:
+        if role == qc.Qt.EditRole:
             if col == ContainerModelColumn.Key:
                 return self.keys[row]
             if col == ContainerModelColumn.Value:
                 if isinstance(item, bool):
                     return qc.QVariant()
-                if isinstance(item, ActorIdentifier):
-                    return str(item)
-                if isinstance(item, Argument):
-                    return str(item)
-                if isinstance(item, list):
-                    return ', '.join(str(i) for i in item)
                 return item
+            if col == ContainerModelColumn.DataType:
+                return util.get_container_value_type(item)
+
+        if role == qc.Qt.DisplayRole or role == qc.Qt.ToolTipRole:
+            if col == ContainerModelColumn.Key:
+                return self.keys[row]
+            if col == ContainerModelColumn.Value:
+                if isinstance(item, bool):
+                    return qc.QVariant()
+                return format_container_display_value(self.keys[row], item)
             if col == ContainerModelColumn.DataType:
                 return util.get_container_value_type(item)
 

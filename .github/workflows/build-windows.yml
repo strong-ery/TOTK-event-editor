@@ -32,11 +32,13 @@ jobs:
             $releaseVersion = "dev-" + $sha.Substring(0, 7)
           }
           $safeVersion = $releaseVersion -replace '[^A-Za-z0-9._-]', '-'
+          $appBundleName = "TOTK Event Editor $releaseVersion"
           $artifactName = "TOTK-EventEditor_${safeVersion}-Windows"
           $packageName = "$artifactName.zip"
 
           Set-Content -Path "eventeditor/assets/release_version.txt" -Value $releaseVersion -NoNewline -Encoding UTF8
           "RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "APP_BUNDLE_NAME=$appBundleName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "ARTIFACT_NAME=$artifactName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PACKAGE_NAME=$packageName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -60,7 +62,7 @@ jobs:
             --noconfirm `
             --clean `
             --windowed `
-            --name "TOTK EventEditor" `
+            --name "$env:APP_BUNDLE_NAME" `
             @iconArgs `
             --collect-all eventeditor `
             --collect-all PyQt5 `
@@ -74,7 +76,7 @@ jobs:
 
       - name: Package executable
         shell: pwsh
-        run: Compress-Archive -Path "dist/TOTK EventEditor/*" -DestinationPath "$env:PACKAGE_NAME"
+        run: Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*" -DestinationPath "$env:PACKAGE_NAME"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

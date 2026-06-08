@@ -3,17 +3,26 @@ import unittest
 from pathlib import Path
 import struct
 
-from evfl import Event, EventFlow, Flowchart
+from evfl import Container, Event, EventFlow, Flowchart
 from evfl.entry_point import EntryPoint
-from evfl.event import SubFlowEvent
+from evfl.event import ActionEvent, SubFlowEvent
+import PyQt5.QtCore as qc # type: ignore
 
+from eventeditor.container_model import (
+    ContainerModel,
+    ContainerModelColumn,
+    format_container_display_value,
+)
+from eventeditor.event_model import EventModel, EventModelColumn
 from eventeditor.__main__ import (
     APP_DISPLAY_NAME,
     GITHUB_REPOSITORY_SLUG,
     GITHUB_REPOSITORY_URL,
+    available_mals_locale_names,
     build_about_html,
     choose_mals_archive_from_directory,
     current_mals_display_name,
+    discover_mals_locale_names,
     find_eventflow_file_in_directory,
     find_filename_flow_name_mismatch,
     find_missing_internal_subflow_calls,
@@ -22,6 +31,8 @@ from eventeditor.__main__ import (
     infer_eventflow_owner_root,
     infer_mals_archive_for_flow_path,
     is_vanilla_romfs_path,
+    mals_locale_name_for_path,
+    manual_mals_archive_path,
     MALS_MODE_INFERRED,
     MALS_MODE_MANUAL,
     normalize_display_version,
@@ -129,6 +140,38 @@ class ReconstructedQoLTests(unittest.TestCase):
             self.assertEqual(choose_mals_archive_from_directory(mals_dir), str(preferred))
             self.assertEqual(infer_mals_archive_for_flow_path(str(flow_path)), str(preferred))
 
+    def test_mals_locale_matching_ignores_product_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mals_dir = Path(tmp) / 'Mals'
+            mals_dir.mkdir()
+            usen_110 = mals_dir / 'USen.Product.110.sarc.zs'
+            usen_120 = mals_dir / 'USen.Product.120.sarc.zs'
+            eufr = mals_dir / 'EUfr.Product.110.sarc.zs'
+            loose = mals_dir / 'USes.sarc.zs'
+            unrelated = mals_dir / 'EventFlowMsg_Test.msbt'
+            for path in [usen_110, usen_120, eufr, loose, unrelated]:
+                path.write_bytes(b'')
+
+            self.assertEqual(mals_locale_name_for_path(usen_110), 'USen')
+            self.assertEqual(mals_locale_name_for_path(eufr), 'EUfr')
+            self.assertEqual(discover_mals_locale_names(mals_dir), ['EUfr', 'USen', 'USes'])
+            self.assertEqual(choose_mals_archive_from_directory(mals_dir, 'EUfr'), str(eufr))
+            self.assertEqual(choose_mals_archive_from_directory(mals_dir, 'USen'), str(usen_110))
+            self.assertEqual(choose_mals_archive_from_directory(mals_dir, 'JPja'), '')
+
+    def test_manual_mals_locale_selection_uses_manual_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mals_dir = Path(tmp) / 'Mals'
+            mals_dir.mkdir()
+            usen = mals_dir / 'USen.Product.110.sarc.zs'
+            jpja = mals_dir / 'JPja.Product.110.sarc.zs'
+            direct_msbt = mals_dir / 'CC_Test.msbt'
+            for path in [usen, jpja, direct_msbt]:
+                path.write_bytes(b'')
+
+            self.assertEqual(manual_mals_archive_path(str(usen), 'JPja'), str(jpja))
+            self.assertEqual(manual_mals_archive_path(str(direct_msbt), 'JPja'), str(direct_msbt))
+
     def test_mals_inference_helpers_for_loose_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'LooseMod'
@@ -173,6 +216,11 @@ class ReconstructedQoLTests(unittest.TestCase):
             ),
             'Manual',
         )
+
+    def test_available_mals_locales_include_known_totk_locales(self):
+        locales = available_mals_locale_names('', '')
+        for locale in ['CNzh', 'EUfr', 'JPja', 'KRko', 'USen', 'USfr']:
+            self.assertIn(locale, locales)
 
     def test_find_eventflow_file_in_directory_prefers_totk_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,6 +268,43 @@ class ReconstructedQoLTests(unittest.TestCase):
             container_xml.loads_container_dict(container_xml.dumps_container_dict(payload)),
             payload,
         )
+
+    def test_choice_label_ints_are_padded_for_display_only(self):
+        self.assertEqual(format_container_display_value('ChoiceLabel1', 0), '0000')
+        self.assertEqual(format_container_display_value('ChoiceLabel2', 12), '0012')
+        self.assertEqual(format_container_display_value('ChoiceLabel3', '7'), '0007')
+        self.assertEqual(format_container_display_value('ChoiceNumber', 2), 2)
+
+        container = Container()
+        container.data = {
+            'ChoiceLabel1': 0,
+            'ChoiceNumber': 2,
+        }
+        model = ContainerModel(None, container)
+        choice_index = model.createIndex(0, ContainerModelColumn.Value)
+        count_index = model.createIndex(1, ContainerModelColumn.Value)
+
+        self.assertEqual(model.data(choice_index, qc.Qt.DisplayRole), '0000')
+        self.assertEqual(model.data(choice_index, qc.Qt.ToolTipRole), '0000')
+        self.assertEqual(model.data(choice_index, qc.Qt.EditRole), 0)
+        self.assertEqual(model.data(count_index, qc.Qt.DisplayRole), 2)
+
+    def test_event_parameter_summary_pads_choice_labels(self):
+        event = Event()
+        event.name = 'Event1'
+        event.data = ActionEvent()
+        event.data.params = Container()
+        event.data.params.data = {
+            'ChoiceLabel1': 0,
+            'ChoiceNumber': 2,
+        }
+
+        model = EventModel()
+        model.l = [event]
+        index = model.createIndex(0, EventModelColumn.Parameters)
+
+        self.assertIn('ChoiceLabel1=0000', model.data(index, qc.Qt.DisplayRole))
+        self.assertIn('<b>ChoiceLabel1</b>: 0000', model.data(index, qc.Qt.ToolTipRole))
 
     def test_actor_xml_roundtrip(self):
         payload = [
@@ -318,6 +403,10 @@ class ReconstructedQoLTests(unittest.TestCase):
             {41: 'talk_000_help01'},
         )
 
+    def test_mals_missing_archive_message_includes_locale(self):
+        self.assertEqual(mals.mals_file_not_found_text('EUfr'), '<EUfr Mals file not found>')
+        self.assertEqual(mals.mals_file_not_found_text(''), '<Selected Mals file not found>')
+
     def test_packaged_assets_resolve(self):
         for asset in [
             'assets/main.js',
@@ -338,6 +427,11 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertNotIn('Mals text', flowchart_py)
         self.assertIn("QAction('Open Mals'", main_py)
         self.assertNotIn('Open Current Mals', main_py)
+        self.assertIn("self.mals_locale_menu = q.QMenu(f'Locale: {DEFAULT_MALS_LOCALE}'", main_py)
+        self.assertIn("def setMalsLocale", main_py)
+        self.assertIn("settings.setValue('locale', self._mals_locale)", main_py)
+        self.assertIn("No {self._mals_locale} Mals archive could be found", main_py)
+        self.assertIn("mals.mals_file_not_found_text(self._mals_locale)", main_py)
         self.assertNotIn("QAction('Show &tags'", main_py)
         self.assertNotIn("'Include text tags'", main_py)
         self.assertNotIn("include_text_tags", main_py)
@@ -352,7 +446,9 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("'Show text bubble breaks'", main_py)
         self.assertIn("show_text_bubble_breaks", main_py)
         self.assertIn("widget.goToSubflowEntryPoint(idx)", main_js)
-        self.assertIn(r"ChoiceLabel\d+", main_js)
+        self.assertIn("^ChoiceLabel\\d+$", main_js)
+        self.assertIn("formatNodeParamValue(value, key)", main_js)
+        self.assertIn(".padStart(4, '0')", main_js)
         self.assertIn("'0': '#ff6634'", main_js)
         self.assertIn("const currentStyle = {};", main_js)
         self.assertIn("hasSvgTextStyle(currentStyle)", main_js)
@@ -409,6 +505,12 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("self._launchNewInstanceForPath(path, entry_point_name=entry_point_name)", main_py)
         self.assertIn("parser.add_argument('--entry-point'", main_py)
         self.assertIn("self.selectStartupEntryPointIfRequested()", main_py)
+
+    def test_windows_build_names_release_executable_with_version(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'build-windows.yml').read_text(encoding='utf-8')
+        self.assertIn('$appBundleName = "TOTK Event Editor $releaseVersion"', workflow)
+        self.assertIn('--name "$env:APP_BUNDLE_NAME"', workflow)
+        self.assertIn('Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*"', workflow)
 
     def test_plain_and_gzip_flow_roundtrip(self):
         flow = EventFlow()
