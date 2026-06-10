@@ -8,37 +8,6 @@
 // ── Global state (unchanged names/semantics) ─────────────────
 let graph;
 let widget;
-
-// ── Loading overlay ───────────────────────────────────────────
-
-let _loadingOverlay = null;
-let _loadingVisible = false;
-
-function _ensureOverlay() {
-  if (_loadingOverlay) return _loadingOverlay;
-  const el = document.createElement('div');
-  el.id = 'loading-overlay';
-  el.innerHTML =
-    '<div class="loading-spinner"></div>' +
-    '<div class="loading-label">Loading…</div>';
-  document.body.appendChild(el);
-  _loadingOverlay = el;
-  return el;
-}
-
-function showLoadingOverlay() {
-  if (_loadingVisible) return;
-  _loadingVisible = true;
-  const el = _ensureOverlay();
-  el.classList.remove('hidden');
-}
-
-function hideLoadingOverlay() {
-  if (!_loadingVisible) return;
-  _loadingVisible = false;
-  const el = _ensureOverlay();
-  el.classList.add('hidden');
-}
 let cpuTimeHistory = [];
 let fpsContainer = null;
 let lastFrameTime = performance.now();
@@ -859,28 +828,15 @@ function handleBackgroundContextMenu() {
 // Node types: entry, action, switch, fork, join, sub_flow
 // Selection and search-match states are applied as extra classes.
 
-// ── Theme helpers ─────────────────────────────────────────────
-
-// Returns 'light' | 'slate' | 'abyss'
-function getCurrentTheme() {
-  const cl = document.body.classList;
-  if (cl.contains('abyss-mode')) return 'abyss';
-  if (cl.contains('slate-mode')) return 'slate';
-  return 'light';
-}
-
-function buildCytoscapeStylesheet(theme) {
-  const isDark = theme === 'slate' || theme === 'abyss';
-  const isAbyss = theme === 'abyss';
-
-  const bg = isAbyss ? '#16181a' : isDark ? '#3c3f41' : '#f5f5f5';
-  const defaultNodeBg = isAbyss ? '#1c1f22' : isDark ? '#4a525e' : '#ffffff';
-  const defaultNodeBorder = isAbyss ? '#3a3f46' : isDark ? '#7a8694' : '#888888';
-  const labelColor = isAbyss ? '#d4d8de' : isDark ? '#f0f0f0' : '#222222';
-  const edgeColor = isAbyss ? '#6a7480' : isDark ? '#8a9ab0' : '#555555';
-  const virtualEdgeColor = isAbyss ? '#3a3f46' : isDark ? '#5a6472' : '#aaaaaa';
-  const edgeLabelBg = isAbyss ? '#16181a' : isDark ? '#3c3f41' : '#f5f5f5';
-  const edgeLabelColor = isAbyss ? '#9aa0a8' : isDark ? '#c0c8d4' : '#333333';
+function buildCytoscapeStylesheet(isDark) {
+  const bg = isDark ? '#3c3f41' : '#f5f5f5';
+  const defaultNodeBg = isDark ? '#4a525e' : '#ffffff';
+  const defaultNodeBorder = isDark ? '#7a8694' : '#888888';
+  const labelColor = isDark ? '#f0f0f0' : '#222222';
+  const edgeColor = isDark ? '#8a9ab0' : '#555555';
+  const virtualEdgeColor = isDark ? '#5a6472' : '#aaaaaa';
+  const edgeLabelBg = isDark ? '#3c3f41' : '#f5f5f5';
+  const edgeLabelColor = isDark ? '#c0c8d4' : '#333333';
 
   return [
     {
@@ -921,8 +877,8 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'node.entry',
       style: {
-        'background-color': isAbyss ? '#1a2e1a' : isDark ? '#2d4a2d' : '#e6f4ea',
-        'border-color': isAbyss ? '#3a8a40' : isDark ? '#4caf50' : '#34a853',
+        'background-color': isDark ? '#2d4a2d' : '#e6f4ea',
+        'border-color': isDark ? '#4caf50' : '#34a853',
         'border-width': 2,
         'shape': 'round-rectangle',
         'font-weight': 'bold',
@@ -932,16 +888,16 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'node.action',
       style: {
-        'background-color': isAbyss ? '#141e2e' : isDark ? '#2a3a50' : '#e8f0fe',
-        'border-color': isAbyss ? '#3a6aaa' : isDark ? '#5588cc' : '#4285f4',
+        'background-color': isDark ? '#2a3a50' : '#e8f0fe',
+        'border-color': isDark ? '#5588cc' : '#4285f4',
       },
     },
     // Switch nodes (query/condition)
     {
       selector: 'node.switch',
       style: {
-        'background-color': isAbyss ? '#1e1a0e' : isDark ? '#3a3020' : '#fef7e0',
-        'border-color': isAbyss ? '#a07818' : isDark ? '#c8962a' : '#f9ab00',
+        'background-color': isDark ? '#3a3020' : '#fef7e0',
+        'border-color': isDark ? '#c8962a' : '#f9ab00',
         'shape': 'diamond',
       },
     },
@@ -949,8 +905,8 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'node.fork',
       style: {
-        'background-color': isAbyss ? '#1a1020' : isDark ? '#3a2040' : '#fce8fd',
-        'border-color': isAbyss ? '#7a3090' : isDark ? '#a050b8' : '#9334e6',
+        'background-color': isDark ? '#3a2040' : '#fce8fd',
+        'border-color': isDark ? '#a050b8' : '#9334e6',
         'shape': 'hexagon',
       },
     },
@@ -958,8 +914,8 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'node.join',
       style: {
-        'background-color': isAbyss ? '#1a1020' : isDark ? '#3a2040' : '#fce8fd',
-        'border-color': isAbyss ? '#7a3090' : isDark ? '#a050b8' : '#9334e6',
+        'background-color': isDark ? '#3a2040' : '#fce8fd',
+        'border-color': isDark ? '#a050b8' : '#9334e6',
         'shape': 'hexagon',
       },
     },
@@ -967,8 +923,8 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'node.sub_flow',
       style: {
-        'background-color': isAbyss ? '#1e1010' : isDark ? '#3a2828' : '#fdecea',
-        'border-color': isAbyss ? '#903030' : isDark ? '#c04040' : '#d93025',
+        'background-color': isDark ? '#3a2828' : '#fdecea',
+        'border-color': isDark ? '#c04040' : '#d93025',
         'shape': 'round-rectangle',
         'border-style': 'double',
       },
@@ -977,9 +933,9 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'node.selected',
       style: {
-        'border-color': isAbyss ? '#5ab8ff' : isDark ? '#5aaaff' : '#1a73e8',
+        'border-color': isDark ? '#5aaaff' : '#1a73e8',
         'border-width': 3,
-        'background-color': isAbyss ? '#0e1e32' : isDark ? '#1e3a5f' : '#d2e3fc',
+        'background-color': isDark ? '#1e3a5f' : '#d2e3fc',
       },
     },
     // Search match
@@ -988,7 +944,7 @@ function buildCytoscapeStylesheet(theme) {
       style: {
         'border-color': '#f9ab00',
         'border-width': 3,
-        'background-color': isAbyss ? '#1e1800' : isDark ? '#3a3010' : '#fff8e1',
+        'background-color': isDark ? '#3a3010' : '#fff8e1',
       },
     },
     // Current search result (overrides search-match)
@@ -997,7 +953,7 @@ function buildCytoscapeStylesheet(theme) {
       style: {
         'border-color': '#ea4335',
         'border-width': 3.5,
-        'background-color': isAbyss ? '#1e0808' : isDark ? '#3a1010' : '#fde8e8',
+        'background-color': isDark ? '#3a1010' : '#fde8e8',
       },
     },
     // Edges
@@ -1034,16 +990,16 @@ function buildCytoscapeStylesheet(theme) {
     {
       selector: 'edge.selected-in-edge',
       style: {
-        'line-color': isAbyss ? '#5ab8ff' : isDark ? '#4db6ff' : '#1a73e8',
-        'target-arrow-color': isAbyss ? '#5ab8ff' : isDark ? '#4db6ff' : '#1a73e8',
+        'line-color': isDark ? '#4db6ff' : '#1a73e8',
+        'target-arrow-color': isDark ? '#4db6ff' : '#1a73e8',
         'width': 2.5,
       },
     },
     {
       selector: 'edge.selected-out-edge',
       style: {
-        'line-color': isAbyss ? '#ffaa70' : isDark ? '#ff9e64' : '#e65c00',
-        'target-arrow-color': isAbyss ? '#ffaa70' : isDark ? '#ff9e64' : '#e65c00',
+        'line-color': isDark ? '#ff9e64' : '#e65c00',
+        'target-arrow-color': isDark ? '#ff9e64' : '#e65c00',
         'width': 2.5,
       },
     },
@@ -1068,7 +1024,7 @@ class Renderer {
     this.cy = cytoscape({
       container: document.getElementById('graph'),
       elements: [],
-      style: buildCytoscapeStylesheet(getCurrentTheme()),
+      style: buildCytoscapeStylesheet(isDark),
       layout: { name: 'preset' },
       minZoom: 0.05,
       maxZoom: 4,
@@ -1085,7 +1041,8 @@ class Renderer {
 
   refreshStylesheet() {
     if (!this.cy) return;
-    this.cy.style(buildCytoscapeStylesheet(getCurrentTheme()));
+    const isDark = document.body.classList.contains('dark-mode');
+    this.cy.style(buildCytoscapeStylesheet(isDark));
   }
 
   // ── Event binding ───────────────────────────────────────────
@@ -1174,10 +1131,10 @@ class Renderer {
     // Filter by whitelist if set
     const filteredElements = this.nodeWhitelist
       ? elements.filter((el) => {
-        if (el.group === 'nodes') return this.nodeWhitelist.has(el.data.id);
-        if (el.group === 'edges') return this.nodeWhitelist.has(el.data.source) && this.nodeWhitelist.has(el.data.target);
-        return false;
-      })
+          if (el.group === 'nodes') return this.nodeWhitelist.has(el.data.id);
+          if (el.group === 'edges') return this.nodeWhitelist.has(el.data.source) && this.nodeWhitelist.has(el.data.target);
+          return false;
+        })
       : elements;
 
     const cy = this.cy;
@@ -1686,15 +1643,15 @@ graph = new Graph();
 
 function pushNodeParams(parts, node) {
   if (!node || !node.data || !node.data.params) return;
-  try { parts.push(JSON.stringify(node.data.params)); } catch (err) { }
+  try { parts.push(JSON.stringify(node.data.params)); } catch (err) {}
 }
 
 function pushNodeIdentity(parts, node) {
   if (!node || !node.data) return;
-  if (node.data.name) parts.push(node.data.name);
-  if (node.data.actor) parts.push(node.data.actor);
+  if (node.data.name)   parts.push(node.data.name);
+  if (node.data.actor)  parts.push(node.data.actor);
   if (node.data.action) parts.push(node.data.action);
-  if (node.data.query) parts.push(node.data.query);
+  if (node.data.query)  parts.push(node.data.query);
 }
 
 function pushMalsText(parts, node) {
@@ -1836,17 +1793,6 @@ window.eventEditorSetShowMessageBubbleBreaks = function (show) {
   showMessageBubbleBreaks = !!show;
 };
 
-// Theme cycling: 'light' → 'slate' → 'abyss'
-window.eventEditorSetTheme = function (theme) {
-  document.body.classList.remove('dark-mode', 'slate-mode', 'abyss-mode');
-  if (theme === 'slate') document.body.classList.add('slate-mode');
-  else if (theme === 'abyss') document.body.classList.add('abyss-mode');
-  // 'light' leaves no class
-  if (graph && graph.renderer) {
-    graph.renderer.refreshStylesheet();
-  }
-};
-
 window.eventEditorStepSearch = function (delta) {
   if (!graphSearchMatches.length) { emitSearchResults(); return; }
   const offset = delta < 0 ? -1 : 1;
@@ -1889,9 +1835,9 @@ document.body.addEventListener('keydown', (event) => {
     // No selection — pan with arrow keys
     let vDir = 0, hDir = 0;
     switch (key) {
-      case 'ArrowUp': vDir = 1; break;
-      case 'ArrowDown': vDir = -1; break;
-      case 'ArrowLeft': hDir = 1; break;
+      case 'ArrowUp':    vDir = 1;  break;
+      case 'ArrowDown':  vDir = -1; break;
+      case 'ArrowLeft':  hDir = 1;  break;
       case 'ArrowRight': hDir = -1; break;
     }
     const pan = graph.renderer.getPan();
@@ -1999,9 +1945,8 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
 
   function load(cb) {
     const loadToken = ++pendingLoadFinalizeToken;
-    showLoadingOverlay();
     widget.getJson((data) => {
-      if (!data) { hideLoadingOverlay(); return; }
+      if (!data) return;
       const transitionMs = nextGraphTransitionMs;
       nextGraphTransitionMs = GRAPH_TRANSITION_MS;
       const isFastUpdate = !resetViewportOnNextLoad && checkCanFastUpdate(data);
@@ -2018,7 +1963,6 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
 
       const finalizeLoad = () => {
         if (loadToken !== pendingLoadFinalizeToken) return;
-        hideLoadingOverlay();
         if (preservedViewport && !resetViewportOnNextLoad) {
           graph.renderer.restoreViewport(preservedViewport);
           if (preservedFocusNodeId != null) {
@@ -2056,7 +2000,6 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
   widget.flowDataChanged.connect(() => { load(); });
 
   widget.fileLoaded.connect(() => {
-    showLoadingOverlay();
     graph.clearPersistentComponentFilter();
     graph.renderer.clearSelection();
     preservedViewport = null;
