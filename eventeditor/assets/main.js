@@ -6,6 +6,7 @@
 // ============================================================
 
 // ── Global state (unchanged names/semantics) ─────────────────
+const SHOW_PROFILER = true; // Set to false to disable the performance profiler HUD
 let graph;
 let widget;
 let cpuTimeHistory = [];
@@ -1115,9 +1116,11 @@ class Renderer {
 
     // Viewport change → CPU profiling
     cy.on('pan zoom', () => {
-      const tStart = performance.now();
-      const tEnd = performance.now();
-      cpuTimeHistory.push(tEnd - tStart);
+      if (SHOW_PROFILER) {
+        const tStart = performance.now();
+        const tEnd = performance.now();
+        cpuTimeHistory.push(tEnd - tStart);
+      }
     });
   }
 
@@ -2050,7 +2053,9 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
 
   widget.emitReadySignal();
   load();
-  initProfiler();
+  if (SHOW_PROFILER) {
+    initProfiler();
+  }
 });
 
 // ── Graphics renderer detection (unchanged) ──────────────────
